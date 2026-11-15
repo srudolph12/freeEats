@@ -37,16 +37,24 @@
     <section id="view-auth" aria-labelledby="auth-title" hidden>
       <div class="panel share auth">
         <h2 id="auth-title">Sign in with your school email</h2>
-        <p class="muted lead">FreeEats is only for students and staff. We'll email you a 6-digit code to confirm it's you.</p>
+        <p class="muted lead" id="auth-lead">FreeEats is only for students and staff. New here? We'll email you a 6-digit code to confirm it's you.</p>
 
         <form id="email-form" novalidate>
           <label class="field">
             <span>School email</span>
-            <input id="email" type="email" inputmode="email" autocomplete="email" maxlength="254" placeholder="you@school.edu" required>
+            <input id="email" type="email" inputmode="email" autocomplete="username" maxlength="254" placeholder="you@school.edu" required>
           </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="password" type="password" autocomplete="current-password" maxlength="128" placeholder="Leave blank to get a code instead">
+          </label>
+          <p class="hint">No password yet? Leave it blank and we'll email you a code. You can set one after.</p>
           <div class="form-actions">
             <button type="submit" class="btn primary big" id="email-btn">Email me a code</button>
             <p class="status" id="email-status" role="status" aria-live="polite"></p>
+          </div>
+          <div class="row-actions center">
+            <button type="button" class="btn quiet small" id="forgot-btn">Forgot your password? Email me a code</button>
           </div>
         </form>
 
@@ -63,6 +71,22 @@
           <div class="row-actions">
             <button type="button" class="btn quiet small" id="change-email">Use a different email</button>
             <button type="button" class="btn quiet small" id="resend-btn">Send a new code</button>
+          </div>
+        </form>
+
+        <form id="setpw-form" novalidate hidden>
+          <p class="sent-to"><strong>You're in!</strong> Set a password for <strong id="setpw-email"></strong> and you can sign in with it instead of waiting for an email.</p>
+          <input type="email" id="setpw-username" autocomplete="username" hidden>
+          <label class="field">
+            <span>New password</span>
+            <input id="setpw-new" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="At least 8 characters">
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn primary big" id="setpw-btn">Save password</button>
+            <p class="status" id="setpw-status" role="status" aria-live="polite"></p>
+          </div>
+          <div class="row-actions center">
+            <button type="button" class="btn quiet small" id="setpw-skip">Skip for now</button>
           </div>
         </form>
       </div>
@@ -250,7 +274,20 @@
           </section>
           <section class="panel acct-section" aria-labelledby="signin-title">
             <h3 id="signin-title">Sign-in</h3>
-            <p class="muted small-text">You sign in with a code sent to your school email. Each device stays signed in for 30 days.</p>
+            <p class="muted small-text" id="pw-status">Each device stays signed in for 30 days.</p>
+            <form id="pw-form" class="pw-form" novalidate>
+              <input type="email" id="pw-username" autocomplete="username" hidden>
+              <label class="field" id="pw-current-wrap">
+                <span>Current password</span>
+                <input id="pw-current" type="password" autocomplete="current-password" maxlength="128">
+              </label>
+              <label class="field">
+                <span id="pw-new-label">New password</span>
+                <input id="pw-new" type="password" autocomplete="new-password" minlength="8" maxlength="128" placeholder="At least 8 characters">
+              </label>
+              <button type="submit" class="btn" id="pw-btn">Set password</button>
+              <p class="status" id="pw-form-status" role="status" aria-live="polite"></p>
+            </form>
             <div class="acct-actions">
               <button type="button" class="btn" id="acct-signout">Sign out</button>
               <button type="button" class="btn danger" id="acct-signout-all">Sign out on all devices</button>

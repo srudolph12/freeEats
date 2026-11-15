@@ -2,7 +2,7 @@
 
 An app to help students find available food around their campus, and to cut down on the food universities waste by connecting the supply with the demand.
 
-Students post leftover food (a photo, how many servings, and where it is). Others browse what's available nearby and **check in** to save a serving. Students sign in with their school (.edu) email and a 6-digit code we email them. No npm packages; it only needs Node 18 or newer.
+Students post leftover food (a photo, how many servings, and where it is). Others browse what's available nearby and **check in** to save a serving. Students sign in with their school (.edu) email and a 6-digit code we email them, and can then set a password so they don't need a code next time. No npm packages; it only needs Node 18 or newer.
 
 ## Run it
 
@@ -32,6 +32,24 @@ Or copy `.env.example` to `.env`, fill it in, and run `npm run start:mail` (or `
 
 To try it from your phone on the same wifi, run `HOST=0.0.0.0 npm start` and open `http://<your-computer's-IP>:3000`.
 Note: browsers only allow location ("Use my location", "My location" pin) on `localhost` or HTTPS, so on a plain `http://` network address those buttons won't work. Everything else will.
+
+## Demo data
+
+To show the app off, fill it with made-up posts around USC:
+
+```bash
+# stop the server first (Ctrl+C), then:
+npm run demo -- --me you@usc.edu   # 12 live posts, plus a check-in history for your account
+npm run dev:mail                   # start it again
+```
+
+- The posts come from fake students (`name@demo.edu`). Nobody is emailed, and they can not sign in.
+- Some servings are already claimed, so you get a mix of full, half-gone and almost-gone pins.
+- `--me` is optional. It gives your account two past check-ins, one past post, and a live check-in, so the Account page has something to show.
+- Posts end within 2 hours like real ones, so run it shortly before you present. Running it again replaces the old demo posts.
+- `npm run demo -- --clear` removes every demo post. Real posts are never touched.
+- Photos come from `scripts/demo-photos/`, named after each post (`pizza.jpg`, `boba.png`, `cookies.webp`, ...; see `photo:` in `scripts/demo.js`). Posts without one show a plate placeholder. JPEG, PNG or WebP, under 3 MB.
+- For another campus, edit `PLACES` in `scripts/demo.js`.
 
 ## What it does
 
@@ -75,6 +93,8 @@ data/            created at runtime: posts.json, sessions.json, users.json, uplo
 |---|---|---|
 | POST | `/api/auth/request-code` | `{ email }`: emails a 6-digit code (.edu only) |
 | POST | `/api/auth/verify` | `{ email, code }`: signs in, sets the session cookie |
+| POST | `/api/auth/login` | `{ email, password }`: signs in with a password |
+| POST | `/api/auth/password` | `{ password, currentPassword }`: set or change your password (signs out your other devices) |
 | GET | `/api/auth/me` | Who is signed in (401 if nobody) |
 | POST | `/api/auth/logout` | Signs out |
 | POST | `/api/auth/logout-all` | Signs out on every device |
@@ -91,7 +111,9 @@ data/            created at runtime: posts.json, sessions.json, users.json, uplo
 | GET | `/uploads/:file` | Photos |
 
 ### Design decisions
-- **School email sign-in.** Only addresses ending in `.edu` can sign in. We email a 6-digit code that expires in 10 minutes and allows 5 guesses; one code per address per minute and 10 per device per hour. Codes and session tokens are stored only as hashes. Sessions last 30 days in an HttpOnly cookie, and changes sent from other websites are refused. Posts and check-ins are tied to the email, so one student gets one serving per post on any device. Any `.edu` address works; to limit it to one school, change the `EDU_EMAIL` pattern in `src/auth.js`.
+- **School email sign-in.** Only addresses ending in `.edu` can sign in. We email a 6-digit code that expires in 10 minutes and allows 5 guesses; one code per address per minute and 10 per device per hour. Codes and session tokens are stored only as hashes. Sessions last 30 days in an HttpOnly cookie, and changes sent from other websites are refused. Posts and check-ins are tied to the email, so one student gets one serving per post on any device. 
+- **Passwords (optional).** After confirming their email with a code, students can set a password (at least 8 characters) right away or later on the Account page, then sign in with email + password instead. Passwords are stored only as salted scrypt hashes in `data/users.json`. The same "email or password is not right" message is shown whether or not an account exists. 5 wrong tries lock that account's password sign-in for 15 minutes (codes still work), and each device gets 30 wrong tries an hour. Changing a password needs the current one, unless you just signed in with an email code (that's the "forgot password" path), and signs out your other devices.
+- Any `.edu` address works; to limit it to one school, change the `EDU_EMAIL` pattern in `src/auth.js`.
 - **Check-ins are processed one at a time**, so two people grabbing the last serving at the same moment can't both get it.
 - **Photos** are checked by file signature (JPEG, PNG, or WebP only; 3 MB max), saved under random names, and deleted with their post.
 - **Cleanup**: posts disappear from Find food when they expire or are marked gone. Their photo is deleted 24 hours later; the rest of the record stays in the poster's and claimers' account history for 180 days, then is deleted.

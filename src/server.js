@@ -6,6 +6,8 @@
  *   GET    /api/health
  *   POST   /api/auth/request-code      body: { email }  emails a 6-digit code (.edu addresses only)
  *   POST   /api/auth/verify            body: { email, code }  signs in (sets a session cookie)
+ *   POST   /api/auth/login             body: { email, password }  signs in with a password
+ *   POST   /api/auth/password          body: { password, currentPassword }  set or change your password
  *   GET    /api/auth/me                the signed-in student, or 401
  *   POST   /api/auth/logout            signs out
  *   POST   /api/auth/logout-all        signs out on every device
@@ -201,6 +203,19 @@ function createServer(opts) {
         const s = await auth.verifyCode(body.email, body.code);
         res.setHeader('Set-Cookie', sessionCookie(req, s.token, s.maxAgeSeconds));
         return sendJson(res, 200, { user: auth.profile(s.email) });
+      }
+      if (pathname === '/api/auth/login') {
+        const body = await readJson(req);
+        auth.sweep();
+        const s = await auth.login(body.email, body.password, req.socket.remoteAddress);
+        res.setHeader('Set-Cookie', sessionCookie(req, s.token, s.maxAgeSeconds));
+        return sendJson(res, 200, { user: auth.profile(s.email) });
+      }
+      if (pathname === '/api/auth/password') {
+        const user = auth.session(token);
+        if (!user) throw new AppError(401, 'Not signed in.');
+        const body = await readJson(req);
+        return sendJson(res, 200, { user: await auth.setPassword(user, body.password, body.currentPassword, token) });
       }
       if (pathname === '/api/auth/logout-all') {
         const user = auth.session(token);

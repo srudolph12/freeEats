@@ -127,6 +127,11 @@ body {
 .sent-to { margin: 0; overflow-wrap: anywhere; }
 .code-input { font-size: 1.5rem !important; font-weight: 800; letter-spacing: 0.35em; text-align: center; }
 .auth .row-actions { margin-top: 8px; }
+.auth .row-actions.center { justify-content: center; }
+.auth .hint { margin-top: 6px; }
+.pw-form { margin-top: 4px; }
+.pw-form .btn { margin-top: 12px; }
+.pw-form .status { text-align: left; }
 
 /* ---------------------------------------------------------------- map */
 .seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: 999px; background: var(--accent-soft); }
@@ -352,8 +357,8 @@ main.wrap { padding-block: 20px 32px; }
 .card.is-claimed { border-color: var(--good); box-shadow: 0 0 0 2px var(--good-soft), var(--shadow); }
 .card.is-gone .card-media img { filter: grayscale(0.8); opacity: 0.7; }
 
-.card-media { position: relative; aspect-ratio: 4 / 3; background: var(--accent-soft); }
-.card-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.card-media { position: relative; aspect-ratio: 4 / 3; overflow: hidden; background: var(--accent-soft); }
+.card-media img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; } /* tall phone photos are cropped, not stretched */
 .no-photo {
   display: grid; place-items: center; width: 100%; height: 100%;
   font-size: 3.4rem;
@@ -446,7 +451,7 @@ main.wrap { padding-block: 20px 32px; }
 .field { display: block; margin: 16px 0 0; border: 0; padding: 0; min-width: 0; }
 .field > span, .field > legend { display: block; font-weight: 700; margin-bottom: 6px; padding: 0; }
 .req { font-style: normal; font-weight: 500; font-size: 0.78rem; color: var(--muted); margin-left: 4px; }
-.field input[type="text"], .field input[type="email"], .field input[type="number"], .field textarea {
+.field input[type="text"], .field input[type="email"], .field input[type="number"], .field input[type="password"], .field textarea {
   width: 100%;
   font: inherit;
   padding: 12px 14px;

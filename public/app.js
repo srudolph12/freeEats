@@ -73,7 +73,7 @@
     return fetch(url, init).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (data) {
         if (!res.ok) {
-          if (res.status === 401 && url.indexOf('/api/auth/') !== 0 && state.user) signedOut('Your session ended. Sign in again.');
+          if (res.status === 401 && (url.indexOf('/api/auth/') !== 0 || url === '/api/auth/password') && state.user) signedOut('Your session ended. Sign in again.');
           var err = new Error(data.error || 'Request failed (' + res.status + ')');
           err.status = res.status;
           throw err;
@@ -990,6 +990,7 @@
     $('profile-email').textContent = email;
     $('profile-since').textContent = data.user.memberSince && monthFmt
       ? 'Member since ' + monthFmt.format(new Date(data.user.memberSince)) : '';
+    renderPasswordSection(data.user);
 
     var st = $('stats');
     st.textContent = '';
@@ -1153,10 +1154,22 @@
 
   function showEmailStep() {
     $('code-form').hidden = true;
+    $('setpw-form').hidden = true;
+    $('auth-title').textContent = 'Sign in with your school email';
+    $('auth-lead').hidden = false;
     $('email-form').hidden = false;
     $('code').value = '';
+    $('password').value = '';
+    $('setpw-new').value = '';
+    updateSignInButton();
     setStatus('code-status', '');
+    setStatus('setpw-status', '');
     $('email').focus();
+  }
+
+  // The main button signs in with the password when one is typed, otherwise emails a code.
+  function updateSignInButton() {
+    $('email-btn').textContent = $('password').value ? 'Sign in' : 'Email me a code';
   }
 
   function isEduEmail(v) {
@@ -1184,15 +1197,51 @@
       });
   }
 
-  function submitEmail(e) {
-    e.preventDefault();
+  function readAuthEmail() {
     var email = $('email').value.trim().toLowerCase();
     if (!isEduEmail(email)) {
       setStatus('email-status', 'Use your school email address (it must end in .edu).', true);
       $('email').focus();
-      return;
+      return null;
     }
-    requestCode(email, $('email-btn'), 'email-status', 'Email me a code');
+    return email;
+  }
+
+  function submitEmail(e) {
+    e.preventDefault();
+    var email = readAuthEmail();
+    if (!email) return;
+    var password = $('password').value;
+    if (!password) return requestCode(email, $('email-btn'), 'email-status', 'Email me a code');
+
+    var btn = $('email-btn');
+    btn.disabled = true;
+    btn.textContent = 'Signing in…';
+    setStatus('email-status', '');
+    api('POST', '/api/auth/login', { email: email, password: password })
+      .then(function (data) {
+        $('email-form').reset();
+        signedIn(data.user);
+        toast('Signed in. Welcome back!');
+      })
+      .catch(function (err) {
+        setStatus('email-status', err.message, true);
+        $('password').select();
+      })
+      .then(function () {
+        btn.disabled = false;
+        updateSignInButton();
+      });
+  }
+
+  function forgotPassword() {
+    var email = readAuthEmail();
+    if (!email) return;
+    $('password').value = '';
+    updateSignInButton();
+    requestCode(email, $('forgot-btn'), 'email-status', 'Forgot your password? Email me a code').then(function (ok) {
+      if (ok) setStatus('code-status', 'After you sign in, set a new password on your Account page.');
+    });
   }
 
   function resendCode() {
@@ -1213,14 +1262,86 @@
       .then(function (data) {
         $('email-form').reset();
         $('code').value = '';
-        signedIn(data.user);
-        toast('Signed in. Welcome!');
+        if (data.user.hasPassword) {
+          signedIn(data.user);
+          toast('Signed in. Welcome!');
+          return;
+        }
+        // First time (or never set one): offer a password so next time needs no code.
+        state.pendingUser = data.user;
+        $('auth-title').textContent = 'Skip the code next time';
+        $('auth-lead').hidden = true;
+        $('code-form').hidden = true;
+        $('setpw-form').hidden = false;
+        $('setpw-email').textContent = data.user.email;
+        $('setpw-username').value = data.user.email;
+        $('setpw-new').focus();
       })
       .catch(function (err) { setStatus('code-status', err.message, true); $('code').select(); })
       .then(function () {
         btn.disabled = false;
         btn.textContent = 'Sign in';
       });
+  }
+
+  function submitSetPassword(e) {
+    e.preventDefault();
+    var pw = $('setpw-new').value;
+    if (pw.length < 8) { setStatus('setpw-status', 'Use at least 8 characters for your password.', true); $('setpw-new').focus(); return; }
+    var btn = $('setpw-btn');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    setStatus('setpw-status', '');
+    api('POST', '/api/auth/password', { password: pw })
+      .then(function (data) {
+        $('setpw-new').value = '';
+        state.pendingUser = null;
+        signedIn(data.user);
+        toast('Password saved. Next time, sign in with it. No code needed.');
+      })
+      .catch(function (err) { setStatus('setpw-status', err.message, true); $('setpw-new').select(); })
+      .then(function () { btn.disabled = false; btn.textContent = 'Save password'; });
+  }
+
+  function skipSetPassword() {
+    var user = state.pendingUser;
+    state.pendingUser = null;
+    $('setpw-new').value = '';
+    signedIn(user);
+    toast('Signed in. You can set a password any time on your Account page.');
+  }
+
+  // Account page: set or change your password.
+  function renderPasswordSection(user) {
+    state.user = user;
+    var has = user.hasPassword;
+    $('pw-status').textContent = (has
+      ? 'You can sign in with your password' + (user.passwordSetAt ? ' (set ' + when(user.passwordSetAt) + ')' : '') + ' or with an email code.'
+      : 'You sign in with a code sent to your school email. Set a password to skip the code next time.') +
+      ' Each device stays signed in for 30 days.';
+    $('pw-current-wrap').hidden = !has;
+    $('pw-username').value = user.email;
+    $('pw-new-label').textContent = has ? 'New password' : 'Password';
+    $('pw-btn').textContent = has ? 'Change password' : 'Set password';
+  }
+
+  function submitAccountPassword(e) {
+    e.preventDefault();
+    var pw = $('pw-new').value;
+    if (pw.length < 8) { setStatus('pw-form-status', 'Use at least 8 characters for your password.', true); $('pw-new').focus(); return; }
+    var btn = $('pw-btn');
+    var label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    setStatus('pw-form-status', '');
+    api('POST', '/api/auth/password', { password: pw, currentPassword: $('pw-current').value || undefined })
+      .then(function (data) {
+        $('pw-form').reset();
+        renderPasswordSection(data.user);
+        setStatus('pw-form-status', 'Password saved. Any other devices were signed out.');
+      })
+      .catch(function (err) { setStatus('pw-form-status', err.message, true); })
+      .then(function () { btn.disabled = false; if (btn.textContent === 'Saving…') btn.textContent = label; });
   }
 
   function signOut() {
@@ -1234,6 +1355,11 @@
   $('email-form').addEventListener('submit', submitEmail);
   $('code-form').addEventListener('submit', submitCode);
   $('change-email').addEventListener('click', showEmailStep);
+  $('password').addEventListener('input', updateSignInButton);
+  $('forgot-btn').addEventListener('click', forgotPassword);
+  $('setpw-form').addEventListener('submit', submitSetPassword);
+  $('setpw-skip').addEventListener('click', skipSetPassword);
+  $('pw-form').addEventListener('submit', submitAccountPassword);
   $('resend-btn').addEventListener('click', resendCode);
   $('signout-btn').addEventListener('click', signOut);
 

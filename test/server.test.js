@@ -417,3 +417,102 @@ test('posters can delete posts, live or past', async (t) => {
 
   assert.equal((await call('DELETE', '/api/posts/' + past.id)).status, 404);
 });
+
+test('passwords: set after a code, then sign in without one', async (t) => {
+  const { server, raw, signIn, outbox } = await start();
+  t.after(() => server.close());
+  const email = 'pat@school.edu';
+  const cookie = await signIn(email);
+
+  let res = await raw('GET', '/api/auth/me', undefined, cookie);
+  assert.equal((await res.json()).user.hasPassword, false);
+
+  res = await raw('POST', '/api/auth/password', { password: 'short' }, cookie);
+  assert.equal(res.status, 400);
+  res = await raw('POST', '/api/auth/password', { password: 'password' }, cookie);
+  assert.equal(res.status, 400);
+  res = await raw('POST', '/api/auth/password', { password: 'pat@school.edu' }, cookie);
+  assert.equal(res.status, 400);
+  res = await raw('POST', '/api/auth/password', { password: 'pizza party 42' });
+  assert.equal(res.status, 401, 'must be signed in');
+
+  res = await raw('POST', '/api/auth/password', { password: 'pizza party 42' }, cookie);
+  assert.equal(res.status, 200);
+  const { user } = await res.json();
+  assert.equal(user.hasPassword, true);
+  assert.equal(user.passwordHash, undefined, 'hash never sent to the browser');
+
+  const users = JSON.parse(fs.readFileSync(path.join(server.auth.usersFile), 'utf8'));
+  assert.match(users[email].passwordHash, /^scrypt\$/);
+  assert.ok(!JSON.stringify(users).includes('pizza party'), 'not stored in plain text');
+
+  const mailsBefore = outbox.length;
+  res = await raw('POST', '/api/auth/login', { email: 'PAT@School.edu', password: 'pizza party 42' });
+  assert.equal(res.status, 200);
+  const pwCookie = res.headers.get('set-cookie').split(';')[0];
+  assert.equal(outbox.length, mailsBefore, 'no email sent');
+  res = await raw('GET', '/api/posts', undefined, pwCookie);
+  assert.equal(res.status, 200, 'password session works');
+
+  res = await raw('POST', '/api/auth/login', { email, password: 'wrong password' });
+  assert.equal(res.status, 401);
+  const wrongMsg = (await res.json()).error;
+  res = await raw('POST', '/api/auth/login', { email: 'nobody@school.edu', password: 'whatever123' });
+  assert.equal(res.status, 401);
+  assert.equal((await res.json()).error, wrongMsg, 'same message whether or not the account exists');
+  res = await raw('POST', '/api/auth/login', { email: 'pat@gmail.com', password: 'pizza party 42' });
+  assert.equal(res.status, 400, 'still .edu only');
+});
+
+test('passwords: changing needs the old one unless you just used a code; other devices signed out', async (t) => {
+  const { server, raw, signIn } = await start();
+  t.after(() => server.close());
+  const email = 'sam@school.edu';
+  const codeCookie = await signIn(email);
+  assert.equal((await raw('POST', '/api/auth/password', { password: 'first secret 1' }, codeCookie)).status, 200);
+
+  let res = await raw('POST', '/api/auth/login', { email, password: 'first secret 1' });
+  const pwCookie = res.headers.get('set-cookie').split(';')[0];
+
+  res = await raw('POST', '/api/auth/password', { password: 'second secret 2' }, pwCookie);
+  assert.equal(res.status, 400, 'password session needs the current password');
+  res = await raw('POST', '/api/auth/password', { password: 'second secret 2', currentPassword: 'nope nope nope' }, pwCookie);
+  assert.equal(res.status, 400);
+  res = await raw('POST', '/api/auth/password', { password: 'second secret 2', currentPassword: 'first secret 1' }, pwCookie);
+  assert.equal(res.status, 200);
+
+  assert.equal((await raw('GET', '/api/auth/me', undefined, codeCookie)).status, 401, 'other device signed out');
+  assert.equal((await raw('GET', '/api/auth/me', undefined, pwCookie)).status, 200, 'this device stays signed in');
+  assert.equal((await raw('POST', '/api/auth/login', { email, password: 'first secret 1' })).status, 401);
+  assert.equal((await raw('POST', '/api/auth/login', { email, password: 'second secret 2' })).status, 200);
+
+  // Forgot password: sign in with a code, then set a new one without the old.
+  const fresh = await signIn(email);
+  res = await raw('POST', '/api/auth/password', { password: 'third secret 3' }, fresh);
+  assert.equal(res.status, 200);
+  assert.equal((await raw('POST', '/api/auth/login', { email, password: 'third secret 3' })).status, 200);
+});
+
+test('passwords: wrong guesses lock the account briefly', async (t) => {
+  let clock = Date.now();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'crumbs-pw-'));
+  const outbox = [];
+  const server = createServer({ dataDir: dir, now: () => clock, sendMail: async (m) => { outbox.push(m); } });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const base = 'http://127.0.0.1:' + server.address().port;
+  const post = (url, body, cookie) => fetch(base + url, {
+    method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, cookie ? { Cookie: cookie } : {}), body: JSON.stringify(body),
+  });
+
+  const email = 'lee@school.edu';
+  await post('/api/auth/request-code', { email });
+  const code = /\b(\d{6})\b/.exec(outbox[0].text)[1];
+  const cookie = (await post('/api/auth/verify', { email, code })).headers.get('set-cookie').split(';')[0];
+  assert.equal((await post('/api/auth/password', { password: 'lunch time 99' }, cookie)).status, 200);
+
+  for (let i = 0; i < 5; i++) assert.equal((await post('/api/auth/login', { email, password: 'bad guess ' + i })).status, 401);
+  assert.equal((await post('/api/auth/login', { email, password: 'lunch time 99' })).status, 429, 'locked, even with the right one');
+  clock += 16 * 60 * 1000;
+  assert.equal((await post('/api/auth/login', { email, password: 'lunch time 99' })).status, 200, 'unlocked after 15 minutes');
+});
