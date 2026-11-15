@@ -1,5 +1,7 @@
 # FreeEats: free food on campus
 
+An app to help students find available food around their campus, and to cut down on the food universities waste by connecting the supply with the demand.
+
 Students post leftover food (a photo, how many servings, and where it is). Others browse what's available nearby and **check in** to save a serving. Students sign in with their school (.edu) email and a 6-digit code we email them. No npm packages; it only needs Node 18 or newer.
 
 ## Run it
