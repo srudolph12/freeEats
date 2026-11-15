@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>FreeEats · Free food on campus</title>
+  <meta name="description" content="Find free food on campus, or share leftovers so nothing goes to waste.">
+  <meta name="theme-color" content="#d9805c">
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-row">
+      <div class="brand">
+        <img class="logo" src="/logo.svg" alt="" width="44" height="44">
+        <div>
+          <h1>FreeEats</h1>
+          <p class="tag">Free food on campus, right now.</p>
+        </div>
+      </div>
+      <nav class="tabs" id="tabs" aria-label="Sections" hidden>
+        <button type="button" class="tab" id="tab-find" aria-pressed="true">Find food</button>
+        <button type="button" class="tab" id="tab-share" aria-pressed="false">Share food</button>
+        <button type="button" class="tab" id="tab-account" aria-pressed="false">Account</button>
+      </nav>
+      <div class="user" id="user-bar" hidden>
+        <button type="button" class="user-email linkish" id="user-email" aria-label="Open your account"></button>
+        <button type="button" class="btn quiet small" id="signout-btn">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- ---------------------------------------------------------- Sign in -->
+    <section id="view-auth" aria-labelledby="auth-title" hidden>
+      <div class="panel share auth">
+        <h2 id="auth-title">Sign in with your school email</h2>
+        <p class="muted lead">FreeEats is only for students and staff. We'll email you a 6-digit code to confirm it's you.</p>
+
+        <form id="email-form" novalidate>
+          <label class="field">
+            <span>School email</span>
+            <input id="email" type="email" inputmode="email" autocomplete="email" maxlength="254" placeholder="you@school.edu" required>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn primary big" id="email-btn">Email me a code</button>
+            <p class="status" id="email-status" role="status" aria-live="polite"></p>
+          </div>
+        </form>
+
+        <form id="code-form" novalidate hidden>
+          <p class="sent-to">We sent a code to <strong id="sent-to"></strong>. It expires in 10 minutes.</p>
+          <label class="field">
+            <span>6-digit code</span>
+            <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="123456" class="code-input" required>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn primary big" id="code-btn">Sign in</button>
+            <p class="status" id="code-status" role="status" aria-live="polite"></p>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="btn quiet small" id="change-email">Use a different email</button>
+            <button type="button" class="btn quiet small" id="resend-btn">Send a new code</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------------ Find -->
+    <section id="view-find" aria-labelledby="find-title" hidden>
+      <h2 id="find-title" class="sr-only">Find food</h2>
+
+      <div class="toolbar">
+        <div class="seg" role="group" aria-label="Show as">
+          <button type="button" class="seg-btn" id="view-list" aria-pressed="true"><span aria-hidden="true">☰</span> List</button>
+          <button type="button" class="seg-btn" id="view-map" aria-pressed="false"><span aria-hidden="true">🗺️</span> Map</button>
+        </div>
+        <button type="button" class="btn" id="locate-btn">
+          <span aria-hidden="true">📍</span> <span id="locate-label">Use my location</span>
+        </button>
+        <div class="dd" id="filters"></div>
+        <label class="sort" id="sort-wrap">
+          <span class="sr-only">Sort by</span>
+          <select id="sort">
+            <option value="nearest">Nearest first</option>
+            <option value="newest">Newest first</option>
+            <option value="ending">Ending soon</option>
+            <option value="servings">Most servings left</option>
+          </select>
+        </label>
+        <button type="button" class="btn quiet" id="refresh-btn" aria-label="Refresh">↻ Refresh</button>
+      </div>
+      <p class="hint" id="find-hint" role="status" aria-live="polite"></p>
+
+      <div class="feed" id="feed" aria-live="polite"></div>
+
+      <div class="map-layout" id="map-layout" hidden>
+        <div class="map-col">
+          <div class="map-box">
+            <div id="map" class="map" role="region" aria-label="Map of free food. Each pin is a post; select one to see it."></div>
+            <p class="map-overlay" id="map-overlay" hidden></p>
+          </div>
+          <div class="map-under">
+            <ul class="legend" aria-label="Pin colors">
+              <li><span class="dot available"></span>Available</li>
+              <li><span class="dot low"></span>3 or fewer left</li>
+              <li><span class="dot claimed"></span>You're checked in</li>
+              <li><span class="dot mine"></span>Your post</li>
+              <li><span class="dot me"></span>You</li>
+            </ul>
+            <button type="button" class="btn quiet small" id="map-fit">Show all pins</button>
+          </div>
+          <p class="hint" id="map-note"></p>
+        </div>
+        <aside class="map-side" id="map-side" aria-live="polite" aria-label="Selected food"></aside>
+      </div>
+
+      <div class="empty" id="empty" hidden>
+        <div class="empty-icon" aria-hidden="true">🍽️</div>
+        <p class="big" id="empty-title">No free food posted right now.</p>
+        <p class="muted" id="empty-text">Check back soon, or be the hero and share some.</p>
+        <button type="button" class="btn primary" id="empty-share">Share food</button>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------------- Share -->
+    <section id="view-share" aria-labelledby="share-title" hidden>
+      <form id="share-form" class="panel share" novalidate>
+        <h2 id="share-title">Share free food</h2>
+        <p class="muted lead" id="share-lead">Leftovers from a meeting or event? Post them so students can grab a serving before it goes to waste.</p>
+
+        <label class="photo-drop" id="photo-drop">
+          <input type="file" id="photo" accept="image/*" capture="environment">
+          <img id="photo-preview" alt="" hidden>
+          <span class="photo-empty" id="photo-empty">
+            <span class="photo-icon" aria-hidden="true">📷</span>
+            <strong>Add a photo</strong>
+            <span class="muted">Take a picture or choose one. Photos make posts much more popular.</span>
+          </span>
+        </label>
+        <button type="button" class="btn quiet small" id="photo-clear" hidden>Remove photo</button>
+
+        <label class="field">
+          <span>What's the food? <em class="req">required</em></span>
+          <input id="title" type="text" maxlength="80" placeholder="e.g. Cheese & veggie pizza" autocomplete="off" required>
+        </label>
+
+        <div class="field">
+          <span id="servings-label">How many servings? <em class="req">required</em></span>
+          <div class="stepper" role="group" aria-labelledby="servings-label">
+            <button type="button" class="btn step" id="serv-minus" aria-label="Fewer servings">−</button>
+            <input id="servings" type="number" inputmode="numeric" min="1" max="200" value="10" aria-labelledby="servings-label">
+            <button type="button" class="btn step" id="serv-plus" aria-label="More servings">+</button>
+          </div>
+          <p class="hint" id="servings-hint" aria-live="polite"></p>
+        </div>
+
+        <div class="row">
+          <label class="field">
+            <span>Building <em class="req">required</em></span>
+            <input id="building" type="text" maxlength="80" placeholder="e.g. Student Union" autocomplete="off" required>
+          </label>
+          <label class="field">
+            <span>Room or spot</span>
+            <input id="details" type="text" maxlength="120" placeholder="e.g. 2nd floor lounge, by the windows" autocomplete="off">
+          </label>
+        </div>
+
+        <div class="field">
+          <span id="pin-label">Pin on the map</span>
+          <div class="seg pin-choice" role="group" aria-labelledby="pin-label">
+            <button type="button" class="seg-btn" id="pin-none" aria-pressed="true">No pin</button>
+            <button type="button" class="seg-btn" id="pin-here" aria-pressed="false"><span aria-hidden="true">📍</span> My location</button>
+            <button type="button" class="seg-btn" id="pin-addr" aria-pressed="false"><span aria-hidden="true">🏠</span> Address</button>
+          </div>
+        </div>
+        <div class="addr-row" id="addr-row" hidden>
+          <label class="field">
+            <span>Street address</span>
+            <input id="address" type="text" maxlength="160" placeholder="e.g. 3607 Trousdale Pkwy, Los Angeles" autocomplete="street-address">
+          </label>
+          <button type="button" class="btn" id="addr-find">Find on map</button>
+        </div>
+        <p class="hint" id="loc-hint" role="status" aria-live="polite">Pinned posts show up on the map so people nearby can find them.</p>
+        <div class="pin-preview" id="pin-preview" hidden>
+          <div id="share-map" aria-label="Where your food is pinned"></div>
+          <p class="hint">Not quite right? Drag the pin to the exact spot.</p>
+        </div>
+
+        <div class="field">
+          <span id="share-tags-label">Dietary info</span>
+          <div class="dd" id="share-tags"></div>
+        </div>
+
+        <label class="field">
+          <span>Available for about</span>
+          <select id="hours"></select>
+        </label>
+
+        <label class="field">
+          <span>Anything else?</span>
+          <textarea id="description" maxlength="300" rows="3" placeholder="e.g. Bring your own plate. Contains nuts."></textarea>
+        </label>
+
+        <div class="form-actions">
+          <button type="submit" class="btn primary big" id="submit-btn">Post free food</button>
+          <div class="edit-actions" id="edit-actions" hidden>
+            <button type="button" class="btn quiet" id="edit-cancel">Cancel</button>
+            <button type="button" class="btn danger" id="edit-delete">Delete post</button>
+          </div>
+          <p class="status" id="form-status" role="status" aria-live="polite"></p>
+        </div>
+      </form>
+    </section>
+    <!-- --------------------------------------------------------- Account -->
+    <section id="view-account" aria-labelledby="account-title" hidden>
+      <div class="account">
+        <div class="panel profile">
+          <div class="avatar" id="avatar" aria-hidden="true"></div>
+          <div class="profile-text">
+            <h2 id="account-title">Your account</h2>
+            <p class="profile-email" id="profile-email"></p>
+            <p class="muted small-text" id="profile-since"></p>
+          </div>
+        </div>
+
+        <div class="stats" id="stats" aria-label="Your totals"></div>
+
+        <div class="account-grid">
+          <section class="panel acct-section" aria-labelledby="checkins-title">
+            <h3 id="checkins-title">Your check-ins</h3>
+            <div class="hist" id="checkins-list"></div>
+          </section>
+          <section class="panel acct-section" aria-labelledby="myposts-title">
+            <h3 id="myposts-title">Your food posts</h3>
+            <div class="hist" id="myposts-list"></div>
+          </section>
+        </div>
+
+        <div class="account-grid">
+          <section class="panel acct-section" aria-labelledby="prefs-title">
+            <h3 id="prefs-title">Preferences</h3>
+            <div class="field">
+              <span id="pref-diet-label">Dietary preferences</span>
+              <div class="dd" id="pref-diet"></div>
+            </div>
+            <p class="hint">Find food starts with these filters on, on every device you sign in to. Saved automatically.</p>
+          </section>
+          <section class="panel acct-section" aria-labelledby="signin-title">
+            <h3 id="signin-title">Sign-in</h3>
+            <p class="muted small-text">You sign in with a code sent to your school email. Each device stays signed in for 30 days.</p>
+            <div class="acct-actions">
+              <button type="button" class="btn" id="acct-signout">Sign out</button>
+              <button type="button" class="btn danger" id="acct-signout-all">Sign out on all devices</button>
+            </div>
+          </section>
+        </div>
+        <p class="muted small-text acct-note">Past posts and check-ins are kept for 180 days. Photos are deleted a day after the food runs out.</p>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <footer class="wrap foot">
+    Be kind: only post food that is free to take, and mark it gone when it runs out.
+  </footer>
+
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
