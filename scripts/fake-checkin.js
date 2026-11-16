@@ -1,0 +1,139 @@
+'use strict';
+
+/**
+ * FreeEats - have a fake student check in to your post, to test check-in pop-ups.
+ *
+ *   npm run fake-checkin -- --setup                 once, with the server STOPPED: creates 10 fake sign-ins
+ *   npm run fake-checkin -- you@usc.edu             with the server running: one fake check-in on your newest live post
+ *   npm run fake-checkin -- you@usc.edu --count 3   three fake students check in
+ *   npm run fake-checkin -- you@usc.edu --title pizza   pick your live post whose title contains "pizza"
+ *
+ * Why two steps: the server keeps sign-ins in memory and only reads data/sessions.json when it
+ * starts, so the fake sign-ins have to be added while it is stopped. After that, check-ins go
+ * through the running server like a real student's, so your open browser sees them.
+ *
+ * The fake students are tester1..tester10@demo.edu. Nobody is emailed. Their sign-in tokens are
+ * kept in data/fake-checkin-tokens.json (git-ignored). Each one can check in to a post once.
+ */
+
+const http = require('node:http');
+const crypto = require('node:crypto');
+const fsp = require('node:fs/promises');
+const path = require('node:path');
+const { Auth } = require('../src/auth');
+
+const FAKES = 10;
+const port = Number(process.env.PORT) || 3000;
+const dataDir = process.env.DATA_DIR || path.resolve(__dirname, '..', 'data');
+const tokensFile = path.join(dataDir, 'fake-checkin-tokens.json');
+
+// Same as hashClient() in src/store.js: how posts store owner and claimer ids.
+const hashClient = (id) => crypto.createHash('sha256').update('crumbs:' + id).digest('hex').slice(0, 32);
+const fakeEmail = (i) => 'tester' + i + '@demo.edu';
+
+function request(method, urlPath, token) {
+  return new Promise((resolve, reject) => {
+    const headers = { Origin: 'http://127.0.0.1:' + port };
+    if (token) headers.Cookie = 'crumbs_session=' + token;
+    const req = http.request({ host: '127.0.0.1', port, path: urlPath, method, headers, timeout: 5000 }, (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => {
+        let data = {};
+        try { data = JSON.parse(body); } catch (e) { /* not JSON */ }
+        resolve({ status: res.statusCode, data });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+const serverRunning = () => request('GET', '/api/health').then((r) => r.status === 200, () => false);
+
+async function setup() {
+  if (await serverRunning()) {
+    console.error('FreeEats is running on port ' + port + '. Stop it (Ctrl+C), run --setup, then start it again.');
+    process.exit(1);
+  }
+  const auth = new Auth({ dataDir, sendMail: async () => {} });
+  await auth.load();
+  const tokens = {};
+  for (let i = 1; i <= FAKES; i++) {
+    const s = await auth.exclusive(() => auth.startSessionLocked(fakeEmail(i), 'code'));
+    tokens[s.email] = s.token;
+  }
+  await fsp.writeFile(tokensFile, JSON.stringify(tokens, null, 2));
+  console.log('Created ' + FAKES + ' fake sign-ins (tester1..tester' + FAKES + '@demo.edu).');
+  console.log('Now start the server (npm run dev or npm run dev:mail), post some food, and run:');
+  console.log('  npm run fake-checkin -- you@yourschool.edu');
+}
+
+async function checkIn(email, title, count) {
+  let tokens;
+  try {
+    tokens = JSON.parse(await fsp.readFile(tokensFile, 'utf8'));
+  } catch (e) {
+    console.error('No fake sign-ins yet. Stop the server and run: npm run fake-checkin -- --setup');
+    process.exit(1);
+  }
+  if (!(await serverRunning())) {
+    console.error('FreeEats is not running on port ' + port + '. Start it first (npm run dev).');
+    process.exit(1);
+  }
+
+  // The posts file is saved on every change, so it shows who owns what (only hashed ids are in it).
+  const posts = JSON.parse(await fsp.readFile(path.join(dataDir, 'posts.json'), 'utf8'));
+  const me = hashClient(Auth.userId(email));
+  const t = Date.now();
+  const mine = posts
+    .filter((p) => p.ownerId === me && !p.closedAt && p.expiresAt > t)
+    .filter((p) => !title || p.title.toLowerCase().includes(title.toLowerCase()))
+    .sort((a, b) => b.createdAt - a.createdAt);
+  if (!mine.length) {
+    console.error('No live post by ' + email + (title ? ' with "' + title + '" in the title' : '') + '. Post some food first.');
+    process.exit(1);
+  }
+  const post = mine[0];
+  console.log('Post: "' + post.title + '" (' + (post.servings - post.claims.length) + ' of ' + post.servings + ' servings left)');
+
+  let done = 0;
+  for (const [fake, token] of Object.entries(tokens)) {
+    if (done >= count) break;
+    if (post.claims.includes(hashClient(Auth.userId(fake)))) continue; // already checked in
+    const r = await request('POST', '/api/posts/' + post.id + '/claim', token);
+    if (r.status === 200) {
+      done++;
+      console.log('  ' + fake + ' checked in. ' + r.data.post.servingsLeft + ' servings left.');
+    } else if (r.status === 401) {
+      console.error('The fake sign-ins have expired or were cleared. Stop the server and run --setup again.');
+      process.exit(1);
+    } else if (r.status !== 409 || /every serving/.test(r.data.error || '')) {
+      console.error('  ' + fake + ': ' + (r.data.error || 'HTTP ' + r.status));
+      if (r.status !== 409) process.exit(1);
+      break;
+    }
+  }
+  if (done < count) console.log('Only ' + done + ' of ' + count + ' could check in (each fake student checks in once per post).');
+  else console.log('Done. The pop-up should show in your browser right away, and the poster gets an email.');
+}
+
+function main() {
+  const a = process.argv.slice(2);
+  if (a.includes('--setup')) return setup();
+  const email = a.find((x) => x.includes('@'));
+  if (!email) {
+    console.error('Usage: npm run fake-checkin -- --setup              (once, server stopped)');
+    console.error('       npm run fake-checkin -- you@school.edu [--count N] [--title words]');
+    process.exit(1);
+  }
+  const opt = (name) => { const i = a.indexOf(name); return i === -1 ? null : a[i + 1]; };
+  const count = Math.max(1, Math.min(FAKES, Number(opt('--count')) || 1));
+  return checkIn(email.trim().toLowerCase(), opt('--title'), count);
+}
+
+main().catch((err) => {
+  console.error(err.message);
+  process.exit(1);
+});

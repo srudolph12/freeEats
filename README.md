@@ -51,6 +51,14 @@ npm run dev:mail                   # start it again
 - Photos come from `scripts/demo-photos/`, named after each post (`pizza.jpg`, `boba.png`, `cookies.webp`, ...; see `photo:` in `scripts/demo.js`). Posts without one show a plate placeholder. JPEG, PNG or WebP, under 3 MB.
 - For another campus, edit `PLACES` in `scripts/demo.js`.
 
+To test the check-in pop-up, have a fake student check in to your own post:
+
+```bash
+npm run fake-checkin -- --setup              # once, with the server stopped
+npm run fake-checkin -- you@usc.edu          # server running: one check-in on your newest live post
+npm run fake-checkin -- you@usc.edu --count 3 --title pizza
+```
+
 ## What it does
 
 **Find food**
@@ -73,6 +81,7 @@ npm run dev:mail                   # start it again
 - Optionally pin it on the map, either at your current GPS location or at a **street address** you type. Addresses are looked up with OpenStreetMap's free Nominatim service (no API key), and you can drag the pin on the preview map to the exact spot. Pinned posts show on the map and work with "nearest" sorting and Directions.
 - Choose how long it's available: 30 minutes, 1 hour, 1.5 hours, or 2 hours (the most). The poster can **Mark as gone** at any time.
 - **Edit** your own live post (from its card or your Account page): change the text, servings (not below how many have checked in), photo, pin, dietary info, or time (still at most 2 hours from when it was first posted).
+- **Check-in alerts**: while the app is open (on any tab), a pop-up appears the moment someone checks in for your food, saying how many servings are left. The server pushes it over a live connection (`/api/events`), with the 20-second refresh as a backup. After you post, the browser asks whether it may also send system notifications, which show up when FreeEats is in a background tab. You also get an **email**: the first check-in is emailed right away, and any more within 5 minutes are bundled into one follow-up email. Alerts never say who checked in. Demo (`@demo.edu`) posters are never emailed.
 - **Delete** your own post, live or past, from your Account page. It is removed for good, including from the history of anyone who checked in.
 
 ## How it's built
@@ -108,6 +117,7 @@ data/            created at runtime: posts.json, sessions.json, users.json, uplo
 | POST | `/api/posts/:id/claim` | Check in for one serving |
 | DELETE | `/api/posts/:id/claim` | Cancel your check-in |
 | POST | `/api/posts/:id/close` | Poster marks the food as gone |
+| GET | `/api/events` | Live updates for the signed-in student (Server-Sent Events): `checkin` / `cancel` when someone checks in to or cancels on one of their posts |
 | GET | `/uploads/:file` | Photos |
 
 ### Design decisions

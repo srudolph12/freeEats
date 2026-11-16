@@ -517,6 +517,34 @@ main.wrap { padding-block: 20px 32px; }
 .toast.error { background: var(--bad); }
 @media (prefers-color-scheme: dark) { .toast { background: #f2e9e1; color: #3b302a; } .toast.error { background: #e3908a; } }
 
+/* ------------------------------------------------- check-in pop-ups */
+.notices {
+  position: fixed; top: calc(14px + env(safe-area-inset-top)); right: 14px; z-index: 30;
+  display: flex; flex-direction: column; gap: 10px;
+  width: min(calc(100vw - 28px), 360px);
+  pointer-events: none;
+}
+.notice {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 14px 14px 14px 16px;
+  border-radius: 16px;
+  background: var(--panel);
+  color: inherit;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--good);
+  box-shadow: 0 16px 36px -12px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  animation: pop 0.25s ease both;
+}
+.notice-icon { font-size: 1.5rem; line-height: 1; }
+.notice-text { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.notice-text strong { font-size: 1rem; }
+.notice-text span { color: var(--muted); font-size: 0.92rem; overflow-wrap: anywhere; }
+.notice-close {
+  border: 0; background: none; color: var(--muted); cursor: pointer;
+  font-size: 1.3rem; line-height: 1; padding: 2px 4px;
+}
+
 .foot { color: var(--muted); font-size: 0.85rem; text-align: center; padding-block: 8px calc(32px + env(safe-area-inset-bottom)); }
 
 @media (max-width: 520px) {

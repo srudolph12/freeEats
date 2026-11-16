@@ -410,4 +410,4 @@ class Store {
   }
 }
 
-module.exports = { Store, AppError, TAGS, DURATIONS_HOURS, LIMITS, isValidClientId };
+module.exports = { Store, AppError, TAGS, DURATIONS_HOURS, LIMITS, isValidClientId, hashClient };

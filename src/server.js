@@ -35,7 +35,7 @@
 const http = require('node:http');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const { Store, AppError, TAGS, DURATIONS_HOURS, LIMITS } = require('./store');
+const { Store, AppError, TAGS, DURATIONS_HOURS, LIMITS, hashClient } = require('./store');
 const { Auth } = require('./auth');
 const { createMailer } = require('./mailer');
 const { createGeocoder } = require('./geocode');
@@ -43,6 +43,7 @@ const { createGeocoder } = require('./geocode');
 const PUBLIC_DIR = path.resolve(__dirname, '..', 'public');
 const MAX_BODY_BYTES = 6 * 1024 * 1024; // a 3 MB photo grows ~33% as base64
 const SESSION_COOKIE = 'crumbs_session';
+const CHECKIN_MAIL_GAP_MS = 5 * 60 * 1000; // at most one check-in email per post every 5 minutes
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -172,6 +173,73 @@ function createServer(opts) {
   const lookups = new Map(); // user id -> times of recent address lookups
   const ready = Promise.all([store.load(), auth.load()]);
 
+  /* ---- live updates: each signed-in browser keeps one /api/events stream open ---- */
+  const streams = new Map(); // hashed user id (as in post.ownerId) -> Set of open responses
+  function pushTo(ownerId, event, data) {
+    const set = streams.get(ownerId);
+    if (!set) return;
+    const msg = 'event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n';
+    for (const res of set) res.write(msg);
+  }
+  // A comment line now and then keeps proxies and sleepy laptops from dropping the stream.
+  const heartbeat = setInterval(() => {
+    for (const set of streams.values()) for (const res of set) res.write(': ping\n\n');
+  }, 25000);
+  heartbeat.unref();
+
+  /* ---- check-in emails to the poster, bundled so a rush of check-ins is one email ---- */
+  const ownerEmails = new Map(); // hashed user id -> email
+  function ownerEmail(ownerId) {
+    if (!ownerEmails.has(ownerId)) {
+      for (const email of auth.users.keys()) ownerEmails.set(hashClient(Auth.userId(email)), email);
+    }
+    return ownerEmails.get(ownerId) || null;
+  }
+  const checkinMail = new Map(); // post id -> { lastSent, pending, timer, link }
+  function queueCheckinEmail(postId, link) {
+    let s = checkinMail.get(postId);
+    if (!s) {
+      if (checkinMail.size > 1000) for (const [k, v] of checkinMail) if (!v.timer) checkinMail.delete(k);
+      s = { lastSent: 0, pending: 0, timer: null, link };
+      checkinMail.set(postId, s);
+    }
+    s.pending++;
+    if (link) s.link = link;
+    if (s.timer) return; // already waiting; this check-in joins that email
+    const wait = Math.max(0, s.lastSent + CHECKIN_MAIL_GAP_MS - Date.now());
+    s.timer = setTimeout(() => sendCheckinEmail(postId, s), wait);
+    s.timer.unref();
+  }
+  function sendCheckinEmail(postId, s) {
+    const count = s.pending;
+    s.timer = null;
+    s.pending = 0;
+    s.lastSent = Date.now();
+    const p = store.posts.find((x) => x.id === postId);
+    if (!p || !count) return;
+    const to = ownerEmail(p.ownerId);
+    if (!to || to.endsWith('@demo.edu')) return; // demo posters are not real inboxes
+    const left = store.left(p);
+    const who = count === 1 ? 'A student' : count + ' students';
+    const lines = [
+      'Hi!',
+      '',
+      who + ' just checked in for your free food "' + p.title + '" at ' + p.building + (p.details ? ' (' + p.details + ')' : '') + '.',
+      '',
+      left > 0
+        ? p.claims.length + ' of ' + p.servings + ' servings are claimed, ' + left + ' left.'
+        : 'Every serving is now claimed. Nice!',
+      store.isActive(p) ? 'If the food runs out early, open FreeEats and tap "Mark as gone" so nobody makes a wasted trip.' : '',
+    ];
+    if (s.link) lines.push('', s.link + '/#account');
+    lines.push('', 'Thanks for sharing!', 'FreeEats');
+    auth.sendMail({
+      to,
+      subject: (count === 1 ? 'Someone checked in' : count + ' students checked in') + ' for your ' + p.title,
+      text: lines.filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n'),
+    }).catch((err) => console.error('Could not send check-in email:', err.message));
+  }
+
   async function route(req, res) {
     const url = new URL(req.url, 'http://localhost');
     const { pathname } = url;
@@ -234,10 +302,32 @@ function createServer(opts) {
 
     let user = null;
     let userId = null;
-    if (pathname.startsWith('/api/posts') || pathname.startsWith('/api/account') || pathname === '/api/geocode') {
+    if (pathname.startsWith('/api/posts') || pathname.startsWith('/api/account') || pathname === '/api/geocode' || pathname === '/api/events') {
       user = auth.session(token);
       if (!user) throw new AppError(401, 'Sign in with your school email to continue.');
       userId = user.id;
+    }
+
+    if (pathname === '/api/events') {
+      if (method !== 'GET') throw new AppError(405, 'Method not allowed');
+      const me = hashClient(userId);
+      let set = streams.get(me);
+      if (!set) streams.set(me, (set = new Set()));
+      if (set.size >= 10) set.values().next().value.end(); // one student, too many tabs: drop the oldest
+      res.writeHead(200, Object.assign({}, SECURITY_HEADERS, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Accel-Buffering': 'no',
+      }));
+      res.write('retry: 3000\n\n');
+      set.add(res);
+      const drop = () => {
+        set.delete(res);
+        if (!set.size && streams.get(me) === set) streams.delete(me);
+      };
+      req.on('close', drop);
+      res.on('close', drop);
+      return;
     }
 
     if (pathname === '/api/account') {
@@ -298,8 +388,13 @@ function createServer(opts) {
     const action = /^\/api\/posts\/([0-9a-f-]{36})\/(claim|close)$/.exec(pathname);
     if (action) {
       const [, id, verb] = action;
-      if (verb === 'claim' && method === 'POST') return sendJson(res, 200, { post: await store.claim(id, userId) });
-      if (verb === 'claim' && method === 'DELETE') return sendJson(res, 200, { post: await store.unclaim(id, userId) });
+      if (verb === 'claim' && (method === 'POST' || method === 'DELETE')) {
+        const post = method === 'POST' ? await store.claim(id, userId) : await store.unclaim(id, userId);
+        const ownerId = store.posts.find((p) => p.id === id).ownerId;
+        pushTo(ownerId, method === 'POST' ? 'checkin' : 'cancel', { postId: id });
+        if (method === 'POST') queueCheckinEmail(id, typeof req.headers.origin === 'string' && /^https?:\/\/[^\s/]+$/.test(req.headers.origin) ? req.headers.origin : null);
+        return sendJson(res, 200, { post });
+      }
       if (verb === 'close' && method === 'POST') return sendJson(res, 200, { post: await store.close(id, userId) });
       throw new AppError(405, 'Method not allowed');
     }

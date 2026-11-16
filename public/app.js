@@ -31,6 +31,7 @@
     editReturn: 'account', // tab to go back to after editing
     view: savedView(), // 'list' or 'map'
     selectedId: null, // post shown beside the map
+    seenClaims: null, // { postId: check-ins we have already told the poster about }
   };
 
   var $ = function (id) { return document.getElementById(id); };
@@ -91,6 +92,77 @@
     t.hidden = false;
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { t.hidden = true; }, 3500);
+  }
+
+  /* ----------------------------------------------- check-in notifications */
+
+  // Pop-ups that stay until closed (or 12 s), so a poster doesn't miss a check-in.
+  function notify(title, body, postId) {
+    var box = $('notices');
+    var card = h('div', { class: 'notice', role: 'status' },
+      h('span', { class: 'notice-icon', 'aria-hidden': 'true' }, '🍽️'),
+      h('div', { class: 'notice-text' }, h('strong', null, title), h('span', null, body)),
+      h('button', { type: 'button', class: 'notice-close', 'aria-label': 'Dismiss' }, '×'));
+    function close() { if (card.parentNode) card.parentNode.removeChild(card); }
+    card.querySelector('.notice-close').addEventListener('click', close);
+    box.appendChild(card);
+    while (box.children.length > 3) box.removeChild(box.firstChild);
+    setTimeout(close, 12000);
+    // Also a system notification when the tab is in the background and the student allowed it.
+    if (document.visibilityState !== 'visible' && window.Notification && Notification.permission === 'granted') {
+      try {
+        var n = new Notification(title, { body: body, icon: '/logo.svg', tag: 'checkin-' + postId });
+        n.onclick = function () { window.focus(); n.close(); };
+      } catch (e) { /* some browsers only allow notifications from a service worker */ }
+    }
+  }
+
+  function askNotifyPermission() {
+    if (window.Notification && Notification.permission === 'default') {
+      try { Notification.requestPermission(); } catch (e) { /* ignore */ }
+    }
+  }
+
+  // Compare check-ins on your own posts with what we saw last time, and announce new ones.
+  function checkNewClaims(posts) {
+    var first = !state.seenClaims;
+    var seen = state.seenClaims || {};
+    var next = {};
+    var news = false;
+    posts.forEach(function (p) {
+      if (!p.mine) return;
+      var count = p.servings - p.servingsLeft;
+      // On the first load everything is old news. After that, a post we haven't seen yet
+      // (say, one posted from another device) counts from zero.
+      var before = first ? count : (seen[p.id] === undefined ? 0 : seen[p.id]);
+      if (count > before) {
+        var added = count - before;
+        news = true;
+        notify(
+          added === 1 ? 'Someone checked in!' : added + ' students checked in!',
+          'For your “' + p.title + '”: ' + (p.servingsLeft === 0 ? 'every serving is now claimed.'
+            : p.servingsLeft + (p.servingsLeft === 1 ? ' serving' : ' servings') + ' left.'),
+          p.id);
+      }
+      next[p.id] = count; // a cancelled check-in just lowers the baseline
+    });
+    state.seenClaims = next;
+    return news;
+  }
+
+  // The server pushes a nudge down this stream the moment someone checks in for (or cancels on)
+  // one of your posts; we then reload, and checkNewClaims() shows the pop-up. Polling stays as a backup.
+  var events = null;
+  function connectEvents() {
+    if (events || !window.EventSource) return;
+    events = new EventSource('/api/events');
+    var refresh = function () { if (state.user) load(); };
+    events.addEventListener('checkin', refresh);
+    events.addEventListener('cancel', refresh);
+  }
+  function disconnectEvents() {
+    if (events) events.close();
+    events = null;
   }
 
   function now() { return Date.now() + state.clockOffset; }
@@ -166,9 +238,11 @@
     return api('GET', '/api/posts')
       .then(function (data) {
         state.posts = data.posts;
+        var fresh = checkNewClaims(data.posts);
         state.clockOffset = data.serverTime - Date.now();
         state.loaded = true;
-        renderFeed();
+        if (!$('view-find').hidden) renderFeed();
+        else if (fresh && !$('view-account').hidden) loadAccount();
       })
       .catch(function () {
         if (!state.loaded) {
@@ -941,7 +1015,9 @@
       return;
     }
     api('POST', '/api/posts', body)
-      .then(function () {
+      .then(function (data) {
+        if (state.seenClaims && data.post) state.seenClaims[data.post.id] = 0;
+        askNotifyPermission(); // so we can tell you when someone checks in
         resetShareForm();
         toast('Posted! Thanks for sharing. 🎉');
         state.sort = 'newest';
@@ -1126,6 +1202,7 @@
 
   function signedIn(user) {
     state.user = user;
+    connectEvents();
     state.filters = (user.diet || []).slice(); // saved preferences are the starting filters
     renderFilters();
     $('view-list').setAttribute('aria-pressed', String(state.view === 'list'));
@@ -1140,7 +1217,9 @@
 
   function signedOut(message) {
     state.user = null;
+    disconnectEvents();
     state.posts = [];
+    state.seenClaims = null;
     state.loaded = false;
     $('view-find').hidden = true;
     $('view-share').hidden = true;
@@ -1402,9 +1481,10 @@
     deletePost(p, e.currentTarget, function () { endEdit(); showTab(back, true); });
   });
 
-  // Keep the list fresh while someone is looking at it.
+  // Keep the list fresh, and keep checking for check-ins on your posts from any tab.
+  // (Browsers slow this down in background tabs, which is fine.)
   setInterval(function () {
-    if (state.user && document.visibilityState === 'visible' && !$('view-find').hidden) load();
+    if (state.user && (document.visibilityState === 'visible' || state.posts.some(function (p) { return p.mine; }))) load();
   }, POLL_MS);
   document.addEventListener('visibilitychange', function () {
     if (state.user && document.visibilityState === 'visible' && !$('view-find').hidden) load();

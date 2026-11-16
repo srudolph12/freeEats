@@ -86,7 +86,7 @@ async function smtpSend(cfg, msg) {
   const message = [
     'From: FreeEats <' + cfg.from + '>',
     'To: <' + msg.to + '>',
-    'Subject: ' + msg.subject,
+    'Subject: ' + (/[^\x20-\x7e]/.test(msg.subject) ? '=?UTF-8?B?' + b64(msg.subject) + '?=' : msg.subject),
     'Date: ' + new Date().toUTCString(),
     'Message-ID: <' + crypto.randomUUID() + '@' + domain + '>',
     'MIME-Version: 1.0',

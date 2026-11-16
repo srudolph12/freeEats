@@ -83,7 +83,7 @@ const LIVE_CHECKIN_TITLE = 'Pepperoni & cheese pizza';
 
 const PHOTO_DIR = path.join(__dirname, 'demo-photos');
 const PHOTO_TYPES = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
-const PHOTO_SPELLINGS = { sandwiches: ['sandwhiches'] }; // other names accepted for the same photo
+const PHOTO_SPELLINGS = { sandwiches: ['sandwhiches'], pizza: ['pizza1'] }; // other names accepted for the same photo
 
 /** The photo for a post as a data URL (what the app's upload expects), or undefined. */
 function demoPhoto(name, missing) {
