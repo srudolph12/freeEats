@@ -4,7 +4,9 @@
  * FreeEats - fill the app with demo posts for a presentation.
  *
  *   npm run demo                       add ~12 live posts from made-up students around USC
- *   npm run demo -- --me you@usc.edu   also give your account a history (check-ins and a past post)
+ *   npm run demo -- --me you@usc.edu   also give your account a history (past check-ins and a past post),
+ *                                      demo friends, their friends-only posts, and a friend request,
+ *                                      and sign that account out everywhere so the app starts at sign-in
  *   npm run demo -- --clear            remove every demo post (real posts are never touched)
  *
  * Stop the server first: it keeps posts in memory and would not see (or would overwrite)
@@ -19,11 +21,13 @@
  */
 
 const http = require('node:http');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const { Store } = require('../src/store');
+const { Store, hashClient } = require('../src/store');
 const { Auth } = require('../src/auth');
+const { Friends } = require('../src/friends');
 
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
@@ -44,30 +48,31 @@ const PLACES = {
 };
 
 // minutesAgo: when it was posted. claims: how many demo students already checked in.
+// Times are set so that, newest first, the first post from a --me demo friend (maya) comes 5th.
 const POSTS = [
-  { by: 'maya', at: 'tutor', minutesAgo: 8, hours: 2, servings: 24, claims: 5, photo: 'pizza', title: 'Pepperoni & cheese pizza',
+  { by: 'maya', at: 'tutor', minutesAgo: 11, hours: 2, servings: 24, claims: 5, photo: 'pizza', title: 'Pepperoni & cheese pizza',
     details: '2nd floor, room 227', description: 'Leftover from our club meeting. About 6 boxes. Grab a plate by the door.', tags: [] },
-  { by: 'jordan', at: 'sal', minutesAgo: 22, hours: 1.5, servings: 15, claims: 11, photo: 'burrito-bowls', title: 'Chipotle burrito bowls',
+  { by: 'jordan', at: 'sal', minutesAgo: 16, hours: 1.5, servings: 15, claims: 11, photo: 'burrito-bowls', title: 'Chipotle burrito bowls',
     details: 'Lobby, by the elevators', description: 'Catering from a tech talk. Chicken and sofritas.', tags: ['gluten-free'] },
-  { by: 'priya', at: 'leavey', minutesAgo: 5, hours: 1, servings: 30, claims: 2, photo: 'donuts', title: 'Assorted donuts',
+  { by: 'priya', at: 'leavey', minutesAgo: 3, hours: 1, servings: 30, claims: 2, photo: 'donuts', title: 'Assorted donuts',
     details: 'Front entrance tables', description: 'Study break! Glazed, chocolate and sprinkles.', tags: ['vegetarian'] },
   { by: 'alex', at: 'annenberg', minutesAgo: 35, hours: 2, servings: 12, claims: 4, photo: 'wraps', title: 'Veggie wraps & hummus',
     details: 'Room 207 (Wallis Annenberg Hall)', description: 'Hummus, falafel and veggie wraps. Some have feta.', tags: ['vegetarian'] },
-  { by: 'sam', at: 'village', minutesAgo: 14, hours: 1, servings: 40, claims: 9, photo: 'boba', title: 'Boba from the club fair',
+  { by: 'sam', at: 'village', minutesAgo: 5, hours: 1, servings: 40, claims: 9, photo: 'boba', title: 'Boba from the club fair',
     details: 'Outside Trader Joe\'s, under the blue tent', description: 'Milk tea and taro. Bring your own straw if you can!', tags: ['vegetarian', 'gluten-free'] },
   { by: 'nina', at: 'doheny', minutesAgo: 50, hours: 2, servings: 20, claims: 17, photo: 'bagels', title: 'Bagels & cream cheese',
     details: 'Room 240, grad lounge', description: 'Plain, everything and cinnamon raisin. Almost gone!', tags: ['vegetarian'] },
-  { by: 'omar', at: 'lyon', minutesAgo: 3, hours: 1.5, servings: 18, claims: 0, photo: 'halal', title: 'Halal chicken over rice',
+  { by: 'omar', at: 'lyon', minutesAgo: 19, hours: 1.5, servings: 18, claims: 0, photo: 'halal', title: 'Halal chicken over rice',
     details: 'Front desk patio', description: 'From the MSA event. White sauce and hot sauce on the side.', tags: ['halal'] },
   { by: 'grace', at: 'rth', minutesAgo: 40, hours: 2, servings: 10, claims: 3, photo: 'curry', title: 'Vegan curry & rice',
     details: '1st floor kitchen', description: 'Chickpea and spinach curry. Bring a container if you have one.', tags: ['vegan', 'gluten-free', 'dairy-free'] },
-  { by: 'leo', at: 'marshall', minutesAgo: 18, hours: 1, servings: 25, claims: 6, photo: 'sandwiches', title: 'Sandwich platters',
+  { by: 'leo', at: 'marshall', minutesAgo: 9, hours: 1, servings: 25, claims: 6, photo: 'sandwiches', title: 'Sandwich platters',
     details: 'Room 102, after the recruiting session', description: 'Turkey, ham and a few veggie ones. Chips too.', tags: [] },
   { by: 'hana', at: 'bovard', minutesAgo: 27, hours: 1.5, servings: 16, claims: 8, photo: 'cookies', title: 'Cookies & brownies',
     details: 'Side entrance', description: 'Left over from the concert reception.', tags: ['vegetarian', 'kosher'] },
-  { by: 'diego', at: 'taper', minutesAgo: 12, hours: 2, servings: 14, claims: 1, photo: 'tacos', title: 'Tacos al pastor & veggie tacos',
+  { by: 'diego', at: 'taper', minutesAgo: 13, hours: 2, servings: 14, claims: 1, photo: 'tacos', title: 'Tacos al pastor & veggie tacos',
     details: 'Courtyard benches', description: 'Taco truck catering from a department lunch. Salsa verde included.', tags: ['dairy-free'] },
-  { by: 'ruth', at: null, building: 'Mudd Hall (MHP)', minutesAgo: 9, hours: 1, servings: 8, claims: 2, photo: 'fruit', title: 'Fruit cups & granola bars',
+  { by: 'ruth', at: null, building: 'Mudd Hall (MHP)', minutesAgo: 7, hours: 1, servings: 8, claims: 2, photo: 'fruit', title: 'Fruit cups & granola bars',
     details: 'Philosophy lounge, 1st floor', description: 'Not pinned on the map, so it only shows in the list.', tags: ['vegan', 'gluten-free', 'dairy-free'] },
 ];
 
@@ -79,7 +84,18 @@ const PAST_CHECKINS = [
 const PAST_POSTS = [
   { at: 'sal', hoursAgo: 28, servings: 12, claims: 9, title: 'Leftover hackathon pizza', details: 'Room 101', tags: ['vegetarian'] },
 ];
-const LIVE_CHECKIN_TITLE = 'Pepperoni & cheese pizza';
+
+// For --me: these demo students become your friends, and share some food with friends only.
+const DEMO_FRIENDS = ['maya', 'omar', 'grace', 'diego'];
+const FRIEND_REQUEST_FROM = 'priya'; // a request waiting on your Account page, so you can try Accept
+const FRIENDS_ONLY_POSTS = [
+  { by: 'maya', at: 'village', minutesAgo: 6, hours: 1.5, servings: 8, claims: 2, photo: 'banana-bread', title: 'Homemade banana bread',
+    details: 'Apartment lobby, Building 3', description: 'Baked way too much. Friends only, come grab a slice!', tags: ['vegetarian'] },
+  { by: 'omar', at: 'lyon', minutesAgo: 16, hours: 2, servings: 6, claims: 1, photo: 'biryani', title: 'Leftover chicken biryani',
+    details: 'Study room B', description: 'From my family\'s dinner last night. Bring a container.', tags: ['halal'] },
+  { by: 'grace', at: 'rth', minutesAgo: 25, hours: 1, servings: 12, claims: 7, photo: 'cake', title: 'Birthday cake slices',
+    details: '3rd floor lab', description: 'Lab birthday party leftovers. Chocolate with strawberries.', tags: ['vegetarian'] },
+];
 
 const PHOTO_DIR = path.join(__dirname, 'demo-photos');
 const PHOTO_TYPES = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
@@ -108,7 +124,7 @@ function demoPhoto(name, missing) {
   return 'data:' + PHOTO_TYPES[path.extname(file).toLowerCase()] + ';base64,' + buf.toString('base64');
 }
 
-const DEMO_STUDENTS = 60; // made-up students who "check in" to make the meters look real
+const DEMO_STUDENTS = 200; // made-up students who "check in" to make the meters look real (enough that none goes over the check-in limit)
 
 function args() {
   const a = process.argv.slice(2);
@@ -158,8 +174,20 @@ async function main() {
   store.posts = store.posts.filter((p) => !p.demo);
   const removed = before - store.posts.length;
   await store.exclusive(() => store.save());
+
+  // Remove earlier demo friendships and requests (anything with an @demo.edu student).
+  const friends = new Friends({ dataDir });
+  await friends.load();
+  const isDemo = (email) => email.endsWith('@demo.edu');
+  for (const [email, r] of friends.people) {
+    for (const k of ['friends', 'incoming', 'outgoing']) for (const e of Object.keys(r[k])) if (isDemo(e)) delete r[k][e];
+    if (isDemo(email) || !Object.keys(r.friends).length + Object.keys(r.incoming).length + Object.keys(r.outgoing).length) {
+      friends.people.delete(email);
+    }
+  }
+  await friends.exclusive(() => friends.save());
   if (opts.clear) {
-    console.log('Removed ' + removed + ' demo post' + (removed === 1 ? '' : 's') + '. Real posts were not touched.');
+    console.log('Removed ' + removed + ' demo post' + (removed === 1 ? '' : 's') + ' and all demo friendships. Real posts and friends were not touched.');
     return;
   }
 
@@ -183,6 +211,7 @@ async function main() {
       lat: place.lat,
       lng: place.lng,
       photo: demoPhoto(spec.photo, missingPhotos),
+      visibility: spec.friendsOnly ? 'friends' : 'everyone',
     }, owner);
     const post = store.posts.find((p) => p.id === view.id);
     post.demo = true;
@@ -190,7 +219,8 @@ async function main() {
     const span = Math.max(1, Math.min(realNow, postedAt + hours * HOUR) - postedAt);
     for (let i = 0; i < spec.claims; i++) {
       clock = postedAt + Math.round(((i + 1) / (spec.claims + 1)) * span);
-      await store.claim(post.id, students[next++ % students.length]);
+      // Friends-only: count the made-up students as the poster's friends for these check-ins.
+      await store.claim(post.id, students[next++ % students.length], spec.friendsOnly ? new Map([[hashClient(owner), '']]) : undefined);
     }
     return post;
   }
@@ -210,20 +240,60 @@ async function main() {
       clock = post.createdAt + 90 * MIN;
       await store.close(post.id, me);
     }
-    const live = store.posts.find((p) => p.demo && p.title === LIVE_CHECKIN_TITLE && p.ownerId !== me);
-    clock = realNow - 2 * MIN;
-    if (live) await store.claim(live.id, me);
+
+    // Demo friends: a request each way makes it a friendship.
+    clock = realNow;
+    for (const name of DEMO_FRIENDS) {
+      await friends.add(name + '@demo.edu', opts.me);
+      await friends.add(opts.me, name + '@demo.edu');
+    }
+    await friends.add(FRIEND_REQUEST_FROM + '@demo.edu', opts.me);
+    for (const spec of FRIENDS_ONLY_POSTS) {
+      await make(Object.assign({ friendsOnly: true }, spec), userId(spec.by), realNow - spec.minutesAgo * MIN, spec.hours);
+    }
   }
 
   clock = realNow;
   await store.exclusive(() => store.save());
 
   const soonest = Math.min(...store.posts.filter((p) => p.demo && p.expiresAt > realNow).map((p) => p.expiresAt));
-  console.log('Added ' + POSTS.length + ' live demo posts around USC' + (removed ? ' (replaced ' + removed + ' old ones)' : '') + '.');
-  const withPhotos = POSTS.length - missingPhotos.length;
+  const made = POSTS.length + (me ? FRIENDS_ONLY_POSTS.length : 0);
+  console.log('Added ' + made + ' live demo posts around USC' + (me ? ' (' + FRIENDS_ONLY_POSTS.length + ' of them friends only)' : '') +
+    (removed ? ', replacing ' + removed + ' old ones' : '') + '.');
+  const withPhotos = made - missingPhotos.length;
   console.log(withPhotos + ' of them have photos.' + (missingPhotos.length
     ? ' No photo found for: ' + missingPhotos.join(', ') + ' (add e.g. ' + missingPhotos[0] + '.jpg to scripts/demo-photos/).' : ''));
-  if (me) console.log('Gave ' + opts.me + ' a history: ' + PAST_CHECKINS.length + ' past check-ins, 1 past post, and 1 live check-in.');
+  // Start the presentation signed out: end every session of --me, except the one the
+  // fake check-in script keeps for friends-only posts (it is not a browser).
+  let signedOut = 0;
+  if (me) {
+    const auth = new Auth({ dataDir, sendMail: async () => {} });
+    await auth.load();
+    let keep = null;
+    try {
+      const t = JSON.parse(fs.readFileSync(path.join(dataDir, 'fake-checkin-tokens.json'), 'utf8'));
+      if (t.owners && t.owners[opts.me]) keep = crypto.createHash('sha256').update(t.owners[opts.me]).digest('hex');
+    } catch (e) { /* no fake check-in setup */ }
+    await auth.exclusive(async () => {
+      for (const [key, sess] of auth.sessions) {
+        if (sess.email === opts.me && key !== keep) {
+          auth.sessions.delete(key);
+          signedOut++;
+        }
+      }
+      if (signedOut) await auth.save();
+    });
+  }
+
+  if (me) {
+    console.log('Signed ' + opts.me + ' out' + (signedOut ? ' on ' + signedOut + (signedOut === 1 ? ' device' : ' devices') : ' (it was not signed in anywhere)') +
+      ', so the app starts at the sign-in screen.');
+    console.log('Gave ' + opts.me + ' a history: ' + PAST_CHECKINS.length + ' past check-ins and 1 past post (no live check-ins, so you start fresh).');
+    console.log('Friends: ' + DEMO_FRIENDS.map((n) => n + '@demo.edu').join(', ') + ', with ' + FRIENDS_ONLY_POSTS.length +
+      ' friends-only posts. ' + FRIEND_REQUEST_FROM + '@demo.edu sent you a friend request.');
+  } else {
+    console.log('Add --me you@school.edu to also get demo friends and their friends-only posts.');
+  }
   console.log('The first one ends at ' + new Date(soonest).toLocaleTimeString() + '. Run this again any time for fresh ones.');
   console.log('Now start the server: npm run dev:mail');
 }

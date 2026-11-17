@@ -25,6 +25,10 @@
  *   POST   /api/posts/:id/claim        check in for one serving
  *   DELETE /api/posts/:id/claim        cancel a check-in
  *   POST   /api/posts/:id/close        poster marks the food as gone
+ *   GET    /api/friends                your friends and pending requests
+ *   POST   /api/friends                body: { email }  send a friend request (or accept theirs)
+ *   POST   /api/friends/remove         body: { email }  unfriend, decline, or cancel a request
+ *   GET    /api/events                 live updates (Server-Sent Events) for the signed-in student
  *   GET    /uploads/:file              photos
  *
  * Sessions are an HttpOnly, SameSite=Lax cookie. Changes from other sites are refused
@@ -35,8 +39,9 @@
 const http = require('node:http');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const { Store, AppError, TAGS, DURATIONS_HOURS, LIMITS, hashClient } = require('./store');
-const { Auth } = require('./auth');
+const { Store, AppError, TAGS, DURATIONS_HOURS, LIMITS, MAX_ACTIVE_CHECKINS, hashClient } = require('./store');
+const { Auth, normalizeEmail } = require('./auth');
+const { Friends } = require('./friends');
 const { createMailer } = require('./mailer');
 const { createGeocoder } = require('./geocode');
 
@@ -171,7 +176,14 @@ function createServer(opts) {
   const auth = new Auth({ dataDir, now: opts.now, sendMail: opts.sendMail || createMailer(process.env) });
   const geocode = opts.geocode || createGeocoder(process.env);
   const lookups = new Map(); // user id -> times of recent address lookups
-  const ready = Promise.all([store.load(), auth.load()]);
+  const friends = new Friends({ dataDir, now: opts.now });
+  const ready = Promise.all([store.load(), auth.load(), friends.load()]);
+  const idOf = (email) => hashClient(Auth.userId(email)); // how posts refer to a student
+
+  // Your friends as hashed id -> email, which the store uses for friends-only posts.
+  function friendMap(email) {
+    return new Map(friends.friendsOf(email).map((e) => [idOf(e), e]));
+  }
 
   /* ---- live updates: each signed-in browser keeps one /api/events stream open ---- */
   const streams = new Map(); // hashed user id (as in post.ownerId) -> Set of open responses
@@ -188,22 +200,50 @@ function createServer(opts) {
   heartbeat.unref();
 
   /* ---- check-in emails to the poster, bundled so a rush of check-ins is one email ---- */
-  const ownerEmails = new Map(); // hashed user id -> email
-  function ownerEmail(ownerId) {
-    if (!ownerEmails.has(ownerId)) {
-      for (const email of auth.users.keys()) ownerEmails.set(hashClient(Auth.userId(email)), email);
+  // Hashed user id (as stored on posts) -> email. Rebuilt when someone new has signed up.
+  const emails = new Map();
+  let emailsBuiltFor = -1;
+  function emailForId(id) {
+    if (!emails.has(id) && emailsBuiltFor !== auth.users.size) {
+      for (const email of auth.users.keys()) emails.set(idOf(email), email);
+      emailsBuiltFor = auth.users.size;
     }
-    return ownerEmails.get(ownerId) || null;
+    return emails.get(id) || null;
+  }
+  const ownerEmail = emailForId;
+
+  // Posters see who checked in to their own posts: [{ email, at }], oldest first.
+  // `email` is null for check-ins by accounts we have no email for (e.g. made-up demo students).
+  function withCheckins(views) {
+    for (const v of views) {
+      if (!v.mine) continue;
+      const p = store.posts.find((x) => x.id === v.id);
+      if (!p) continue;
+      v.checkedIn = p.claims
+        .map((h) => ({ email: emailForId(h), at: (p.claimTimes && p.claimTimes[h]) || null }))
+        .sort((a, b) => (a.at || 0) - (b.at || 0));
+    }
+    return views;
+  }
+
+  // "maya@usc.edu", "maya@usc.edu and omar@usc.edu", "a, b and 2 others"
+  function names(list, unknown) {
+    const parts = list.slice(0, 3);
+    const rest = list.length - parts.length + (unknown || 0);
+    if (!parts.length) return rest > 1 ? rest + ' students' : 'A student';
+    if (rest > 0) parts.push(rest + (rest === 1 ? ' other student' : ' other students'));
+    return parts.length === 1 ? parts[0] : parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
   }
   const checkinMail = new Map(); // post id -> { lastSent, pending, timer, link }
-  function queueCheckinEmail(postId, link) {
+  function queueCheckinEmail(postId, link, who) {
     let s = checkinMail.get(postId);
     if (!s) {
       if (checkinMail.size > 1000) for (const [k, v] of checkinMail) if (!v.timer) checkinMail.delete(k);
-      s = { lastSent: 0, pending: 0, timer: null, link };
+      s = { lastSent: 0, pending: 0, timer: null, link, who: [] };
       checkinMail.set(postId, s);
     }
     s.pending++;
+    if (who) s.who.push(who);
     if (link) s.link = link;
     if (s.timer) return; // already waiting; this check-in joins that email
     const wait = Math.max(0, s.lastSent + CHECKIN_MAIL_GAP_MS - Date.now());
@@ -211,16 +251,19 @@ function createServer(opts) {
     s.timer.unref();
   }
   function sendCheckinEmail(postId, s) {
-    const count = s.pending;
+    const p = store.posts.find((x) => x.id === postId);
+    // Only the students who are still checked in (someone may have cancelled in the meantime).
+    const still = p ? s.who.filter((e, i, a) => a.indexOf(e) === i && p.claims.includes(idOf(e))) : [];
+    const count = Math.max(still.length, s.pending - s.who.length);
     s.timer = null;
     s.pending = 0;
+    s.who = [];
     s.lastSent = Date.now();
-    const p = store.posts.find((x) => x.id === postId);
     if (!p || !count) return;
     const to = ownerEmail(p.ownerId);
     if (!to || to.endsWith('@demo.edu')) return; // demo posters are not real inboxes
     const left = store.left(p);
-    const who = count === 1 ? 'A student' : count + ' students';
+    const who = names(still, count - still.length);
     const lines = [
       'Hi!',
       '',
@@ -235,7 +278,7 @@ function createServer(opts) {
     lines.push('', 'Thanks for sharing!', 'FreeEats');
     auth.sendMail({
       to,
-      subject: (count === 1 ? 'Someone checked in' : count + ' students checked in') + ' for your ' + p.title,
+      subject: (still.length === 1 && count === 1 ? still[0] : count === 1 ? 'Someone' : count + ' students') + ' checked in for your ' + p.title,
       text: lines.filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n'),
     }).catch((err) => console.error('Could not send check-in email:', err.message));
   }
@@ -252,7 +295,7 @@ function createServer(opts) {
     }
 
     if (pathname === '/api/config') {
-      return sendJson(res, 200, { tags: TAGS, durations: DURATIONS_HOURS, limits: LIMITS });
+      return sendJson(res, 200, { tags: TAGS, durations: DURATIONS_HOURS, limits: LIMITS, maxCheckins: MAX_ACTIVE_CHECKINS });
     }
 
     if (pathname.startsWith('/api/auth/')) {
@@ -302,7 +345,7 @@ function createServer(opts) {
 
     let user = null;
     let userId = null;
-    if (pathname.startsWith('/api/posts') || pathname.startsWith('/api/account') || pathname === '/api/geocode' || pathname === '/api/events') {
+    if (pathname.startsWith('/api/posts') || pathname.startsWith('/api/account') || pathname === '/api/geocode' || pathname === '/api/events' || pathname.startsWith('/api/friends')) {
       user = auth.session(token);
       if (!user) throw new AppError(401, 'Sign in with your school email to continue.');
       userId = user.id;
@@ -333,7 +376,26 @@ function createServer(opts) {
     if (pathname === '/api/account') {
       if (method !== 'GET') throw new AppError(405, 'Method not allowed');
       await auth.ensureUser(user.email); // students who signed in before profiles existed
-      return sendJson(res, 200, Object.assign({ user: auth.profile(user.email), serverTime: store.now() }, store.history(userId)));
+      const history = store.history(userId, friendMap(user.email));
+      withCheckins(history.posts);
+      return sendJson(res, 200, Object.assign({ user: auth.profile(user.email), serverTime: store.now() },
+        history, { friends: friends.list(user.email) }));
+    }
+
+    if (pathname === '/api/friends') {
+      if (method === 'GET') return sendJson(res, 200, friends.list(user.email));
+      if (method !== 'POST') throw new AppError(405, 'Method not allowed');
+      const other = normalizeEmail((await readJson(req)).email);
+      const result = await friends.add(user.email, other);
+      pushTo(idOf(other), 'friends', {});
+      return sendJson(res, 200, Object.assign({ result }, friends.list(user.email)));
+    }
+    if (pathname === '/api/friends/remove') {
+      if (method !== 'POST') throw new AppError(405, 'Method not allowed');
+      const other = normalizeEmail((await readJson(req)).email);
+      await friends.remove(user.email, other);
+      pushTo(idOf(other), 'friends', {});
+      return sendJson(res, 200, friends.list(user.email));
     }
     if (pathname === '/api/account/preferences') {
       if (method !== 'PUT') throw new AppError(405, 'Method not allowed');
@@ -367,7 +429,7 @@ function createServer(opts) {
     }
 
     if (pathname === '/api/posts') {
-      if (method === 'GET') return sendJson(res, 200, { posts: store.list(userId), serverTime: store.now() });
+      if (method === 'GET') return sendJson(res, 200, { posts: withCheckins(store.list(userId, friendMap(user.email))), serverTime: store.now() });
       if (method === 'POST') {
         const body = await readJson(req);
         return sendJson(res, 201, { post: await store.create(body, userId) });
@@ -389,10 +451,11 @@ function createServer(opts) {
     if (action) {
       const [, id, verb] = action;
       if (verb === 'claim' && (method === 'POST' || method === 'DELETE')) {
-        const post = method === 'POST' ? await store.claim(id, userId) : await store.unclaim(id, userId);
+        const mine = friendMap(user.email);
+        const post = method === 'POST' ? await store.claim(id, userId, mine) : await store.unclaim(id, userId, mine);
         const ownerId = store.posts.find((p) => p.id === id).ownerId;
         pushTo(ownerId, method === 'POST' ? 'checkin' : 'cancel', { postId: id });
-        if (method === 'POST') queueCheckinEmail(id, typeof req.headers.origin === 'string' && /^https?:\/\/[^\s/]+$/.test(req.headers.origin) ? req.headers.origin : null);
+        if (method === 'POST') queueCheckinEmail(id, typeof req.headers.origin === 'string' && /^https?:\/\/[^\s/]+$/.test(req.headers.origin) ? req.headers.origin : null, user.email);
         return sendJson(res, 200, { post });
       }
       if (verb === 'close' && method === 'POST') return sendJson(res, 200, { post: await store.close(id, userId) });
@@ -428,6 +491,7 @@ function createServer(opts) {
   });
   server.store = store;
   server.auth = auth;
+  server.friends = friends;
   server.ready = ready;
   return server;
 }

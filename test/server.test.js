@@ -516,3 +516,103 @@ test('passwords: wrong guesses lock the account briefly', async (t) => {
   clock += 16 * 60 * 1000;
   assert.equal((await post('/api/auth/login', { email, password: 'lunch time 99' })).status, 200, 'unlocked after 15 minutes');
 });
+
+test('friends: requests, accepting, and friends-only posts', async (t) => {
+  const { server, call } = await start();
+  t.after(() => server.close());
+  const json = async (res, status) => { assert.equal(res.status, status || 200); return res.json(); };
+
+  // alice asks bob; bob sees the request; adding her back accepts it.
+  let data = await json(await call('POST', '/api/friends', { email: 'Bob@School.edu' }));
+  assert.equal(data.result, 'requested');
+  assert.deepEqual(data.outgoing.map((r) => r.email), ['bob@school.edu']);
+  data = await json(await call('GET', '/api/friends', undefined, 'bob'));
+  assert.deepEqual(data.incoming.map((r) => r.email), ['alice@school.edu']);
+  data = await json(await call('POST', '/api/friends', { email: 'alice@school.edu' }, 'bob'));
+  assert.equal(data.result, 'friends');
+  assert.deepEqual(data.friends.map((r) => r.email), ['alice@school.edu']);
+  assert.equal(data.incoming.length, 0);
+  data = await json(await call('GET', '/api/friends'));
+  assert.deepEqual(data.friends.map((r) => r.email), ['bob@school.edu']);
+  assert.equal(data.outgoing.length, 0);
+
+  await json(await call('POST', '/api/friends', { email: 'alice@school.edu' }), 400); // yourself
+  await json(await call('POST', '/api/friends', { email: 'eve@gmail.com' }), 400); // not .edu
+
+  // A friends-only post: bob (friend) sees it with alice's email; cara (not a friend) can't see or claim it.
+  const { post } = await json(await call('POST', '/api/posts', { title: 'Cake', servings: 4, building: 'Dorm', visibility: 'friends' }), 201);
+  assert.equal(post.visibility, 'friends');
+  await json(await call('POST', '/api/posts', { title: 'Chips', servings: 4, building: 'Dorm' }), 201);
+  await json(await call('POST', '/api/posts', { title: 'Bad', servings: 4, building: 'Dorm', visibility: 'secret' }), 400);
+
+  const bobs = (await json(await call('GET', '/api/posts', undefined, 'bob'))).posts;
+  assert.deepEqual(bobs.map((p) => p.title).sort(), ['Cake', 'Chips']);
+  assert.ok(bobs.every((p) => p.friend === 'alice@school.edu'), 'friends see who posted');
+  const caras = (await json(await call('GET', '/api/posts', undefined, 'cara'))).posts;
+  assert.deepEqual(caras.map((p) => p.title), ['Chips']);
+  assert.equal(caras[0].friend, null, 'strangers do not see who posted');
+  await json(await call('POST', '/api/posts/' + post.id + '/claim', undefined, 'cara'), 404);
+
+  // bob checks in, then they unfriend: bob keeps his serving and can still see it; new posts are hidden.
+  await json(await call('POST', '/api/posts/' + post.id + '/claim', undefined, 'bob'));
+  await json(await call('POST', '/api/friends/remove', { email: 'bob@school.edu' }));
+  assert.equal((await json(await call('GET', '/api/friends', undefined, 'bob'))).friends.length, 0);
+  const after = (await json(await call('GET', '/api/posts', undefined, 'bob'))).posts;
+  assert.deepEqual(after.map((p) => p.title).sort(), ['Cake', 'Chips']);
+  assert.ok(after.every((p) => p.friend === null));
+
+  // Editing keeps the visibility unless it is changed.
+  let res = await call('PATCH', '/api/posts/' + post.id, { title: 'Cake!', servings: 4, building: 'Dorm' });
+  assert.equal((await json(res)).post.visibility, 'friends');
+  res = await call('PATCH', '/api/posts/' + post.id, { title: 'Cake!', servings: 4, building: 'Dorm', visibility: 'everyone' });
+  assert.equal((await json(res)).post.visibility, 'everyone');
+  assert.equal((await json(await call('GET', '/api/posts', undefined, 'cara'))).posts.length, 2);
+
+  // Declining a request and cancelling your own.
+  await json(await call('POST', '/api/friends', { email: 'dan@school.edu' }, 'cara'));
+  await json(await call('POST', '/api/friends/remove', { email: 'cara@school.edu' }, 'dan'));
+  assert.equal((await json(await call('GET', '/api/friends', undefined, 'cara'))).outgoing.length, 0);
+});
+
+test('posters see who checked in, in the app and the email; nobody else does', async (t) => {
+  const { server, call, outbox } = await start();
+  t.after(() => server.close());
+  let res = await call('POST', '/api/posts', { title: 'Tamales', servings: 5, building: 'Hall' });
+  const { post } = await res.json();
+  assert.equal((await call('POST', '/api/posts/' + post.id + '/claim', undefined, 'bob')).status, 200);
+
+  const mine = (await (await call('GET', '/api/posts')).json()).posts[0];
+  assert.deepEqual(mine.checkedIn.map((c) => c.email), ['bob@school.edu']);
+  assert.equal(typeof mine.checkedIn[0].at, 'number');
+  const theirs = (await (await call('GET', '/api/posts', undefined, 'cara')).json()).posts[0];
+  assert.equal(theirs.checkedIn, undefined, 'other students do not see who checked in');
+  const acct = await (await call('GET', '/api/account')).json();
+  assert.deepEqual(acct.posts[0].checkedIn.map((c) => c.email), ['bob@school.edu']);
+
+  await new Promise((r) => setTimeout(r, 30)); // the first check-in email goes out right away
+  const mail = outbox.filter((m) => m.to === 'alice@school.edu' && /checked in/.test(m.subject)).pop();
+  assert.ok(mail, 'poster got an email');
+  assert.equal(mail.subject, 'bob@school.edu checked in for your Tamales');
+  assert.match(mail.text, /bob@school\.edu just checked in/);
+});
+
+test('a student can hold at most 2 check-ins at a time', async (t) => {
+  const { server, call } = await start();
+  t.after(() => server.close());
+  const ids = [];
+  for (const title of ['A', 'B', 'C']) {
+    ids.push((await (await call('POST', '/api/posts', { title, servings: 3, building: 'Hall' })).json()).post.id);
+  }
+  assert.equal((await call('POST', '/api/posts/' + ids[0] + '/claim', undefined, 'bob')).status, 200);
+  assert.equal((await call('POST', '/api/posts/' + ids[1] + '/claim', undefined, 'bob')).status, 200);
+  let res = await call('POST', '/api/posts/' + ids[2] + '/claim', undefined, 'bob');
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /2 check-ins at a time/);
+  // Ended food no longer counts.
+  assert.equal((await call('POST', '/api/posts/' + ids[0] + '/close')).status, 200);
+  assert.equal((await call('POST', '/api/posts/' + ids[2] + '/claim', undefined, 'bob')).status, 200);
+  // Cancelling frees a spot too.
+  assert.equal((await call('DELETE', '/api/posts/' + ids[1] + '/claim', undefined, 'bob')).status, 200);
+  const cfg = await (await call('GET', '/api/config')).json();
+  assert.equal(cfg.maxCheckins, 2);
+});

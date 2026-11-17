@@ -15,7 +15,7 @@
   var state = {
     user: null, // { email } once signed in
     authEmail: '',
-    config: { tags: Object.keys(TAG_LABEL), durations: [1, 2, 3, 4, 6] },
+    config: { tags: Object.keys(TAG_LABEL), durations: [1, 2, 3, 4, 6], maxCheckins: 2 },
     posts: [],
     loaded: false,
     clockOffset: 0, // serverTime - local time
@@ -32,11 +32,18 @@
     view: savedView(), // 'list' or 'map'
     selectedId: null, // post shown beside the map
     seenClaims: null, // { postId: check-ins we have already told the poster about }
+    audience: savedAudience(), // 'all' or 'friends': whose food Find shows
+    visibility: 'everyone', // who can see the post being shared: 'everyone' | 'friends'
+    friends: null, // { friends, incoming, outgoing } from /api/friends, once loaded
   };
 
   var $ = function (id) { return document.getElementById(id); };
 
   /* ------------------------------------------------------------ helpers */
+
+  function savedAudience() {
+    try { return localStorage.getItem('freeeats-audience') === 'friends' ? 'friends' : 'all'; } catch (e) { return 'all'; }
+  }
 
   function savedView() {
     try { return localStorage.getItem('freeeats-view') === 'map' ? 'map' : 'list'; } catch (e) { return 'list'; }
@@ -124,6 +131,19 @@
   }
 
   // Compare check-ins on your own posts with what we saw last time, and announce new ones.
+  function checkinEmails(p) {
+    return (p.checkedIn || []).map(function (c) { return c.email; }).filter(Boolean);
+  }
+
+  // "maya@usc.edu", "maya@usc.edu and omar@usc.edu", "a, b, c and 2 other students", "3 students"
+  function whoText(list, unknown) {
+    var parts = list.slice(0, 3);
+    var rest = list.length - parts.length + (unknown || 0);
+    if (!parts.length) return rest > 1 ? rest + ' students' : 'Someone';
+    if (rest > 0) parts.push(rest + (rest === 1 ? ' other student' : ' other students'));
+    return parts.length === 1 ? parts[0] : parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
+  }
+
   function checkNewClaims(posts) {
     var first = !state.seenClaims;
     var seen = state.seenClaims || {};
@@ -131,20 +151,21 @@
     var news = false;
     posts.forEach(function (p) {
       if (!p.mine) return;
-      var count = p.servings - p.servingsLeft;
+      var cur = { count: p.servings - p.servingsLeft, emails: checkinEmails(p) };
       // On the first load everything is old news. After that, a post we haven't seen yet
       // (say, one posted from another device) counts from zero.
-      var before = first ? count : (seen[p.id] === undefined ? 0 : seen[p.id]);
-      if (count > before) {
-        var added = count - before;
+      var before = first ? cur : seen[p.id] || { count: 0, emails: [] };
+      var added = cur.count - before.count;
+      if (added > 0) {
+        var fresh = cur.emails.filter(function (e) { return before.emails.indexOf(e) === -1; });
         news = true;
         notify(
-          added === 1 ? 'Someone checked in!' : added + ' students checked in!',
+          whoText(fresh, Math.max(0, added - fresh.length)) + ' checked in!',
           'For your “' + p.title + '”: ' + (p.servingsLeft === 0 ? 'every serving is now claimed.'
             : p.servingsLeft + (p.servingsLeft === 1 ? ' serving' : ' servings') + ' left.'),
           p.id);
       }
-      next[p.id] = count; // a cancelled check-in just lowers the baseline
+      next[p.id] = cur; // a cancelled check-in just lowers the baseline
     });
     state.seenClaims = next;
     return news;
@@ -159,6 +180,7 @@
     var refresh = function () { if (state.user) load(); };
     events.addEventListener('checkin', refresh);
     events.addEventListener('cancel', refresh);
+    events.addEventListener('friends', function () { if (state.user) loadFriends(true); });
   }
   function disconnectEvents() {
     if (events) events.close();
@@ -255,7 +277,12 @@
 
   function visiblePosts() {
     var list = state.posts.filter(function (p) {
-      return p.expiresAt > now() && state.filters.every(function (t) { return p.tags.indexOf(t) !== -1; });
+      // Everyone: food shared with everyone. Friends: your friends' food and friends-only posts (yours too).
+      var forAudience = state.audience === 'friends' ? !!p.friend || p.visibility === 'friends' : p.visibility !== 'friends';
+      // Your own posts are managed from your Account page, not listed as food to find.
+      if (p.mine && p.id !== state.selectedId) return false;
+      return p.expiresAt > now() && forAudience &&
+        state.filters.every(function (t) { return p.tags.indexOf(t) !== -1; });
     });
     var me = state.myPos;
     list.forEach(function (p) {
@@ -303,9 +330,13 @@
     $('empty').hidden = !empty;
     if (empty) {
       var filtered = state.filters.length > 0 && state.posts.length > 0;
-      $('empty-title').textContent = filtered ? 'Nothing matches those filters.' : 'No free food posted right now.';
-      $('empty-text').textContent = filtered
-        ? 'Try removing a filter to see everything that is available.'
+      var noFriends = state.friends && state.friends.friends.length === 0;
+      $('empty-title').textContent = state.audience === 'friends'
+        ? (noFriends ? 'You have not added any friends yet.' : filtered ? 'None of your friends\' food matches those filters.' : 'None of your friends are sharing food right now.')
+        : filtered ? 'Nothing matches those filters.' : 'No free food posted right now.';
+      $('empty-text').textContent = state.audience === 'friends'
+        ? (noFriends ? 'Add friends on your Account page to see the food they share with friends.' : 'Switch to "Everyone" to see all the food on campus.')
+        : filtered ? 'Try removing a filter to see everything that is available.'
         : 'Check back soon, or be the hero and share some.';
     }
     if (!state.loaded) {
@@ -337,7 +368,8 @@
         badge,
         p.mine ? h('span', { class: 'badge mine' }, 'Your post') : null),
       h('div', { class: 'card-body' },
-        h('h3', null, p.title),
+        h('h3', null, p.title, p.visibility === 'friends' ? h('span', { class: 'vis-pill' }, '👥 Friends only') : null),
+        p.friend ? h('p', { class: 'by-friend' }, 'Shared by your friend ' + p.friend) : null,
         h('p', { class: 'where' }, h('span', { 'aria-hidden': 'true' }, '📍 '), where,
           p.lat !== null
             ? h('a', {
@@ -382,6 +414,13 @@
     if (p.servingsLeft <= 0) {
       return h('div', { class: 'actions' }, h('button', { type: 'button', class: 'btn', disabled: true }, 'All claimed'));
     }
+    var max = state.config.maxCheckins;
+    var holding = state.posts.filter(function (x) { return x.claimedByMe && x.expiresAt > now() && x.status !== 'ended'; }).length;
+    if (holding >= max) {
+      return h('div', { class: 'actions stack' },
+        h('button', { type: 'button', class: 'btn', disabled: true }, 'Check-in limit reached'),
+        h('p', { class: 'hint' }, 'You can have ' + max + ' check-ins at a time. Pick up your food or cancel a check-in to save this one.'));
+    }
     return h('div', { class: 'actions' },
       h('button', { type: 'button', class: 'btn primary', onclick: function (e) { claim(p, e.currentTarget); } }, 'Check in for a serving'));
   }
@@ -401,7 +440,7 @@
     api('POST', '/api/posts/' + p.id + '/claim')
       .then(function (data) {
         replacePost(data.post);
-        toast('Checked in! One serving is saved for you.');
+        toast('Checked in! One serving is saved for you. The poster can see it was you.');
       })
       .catch(function (e) { toast(e.message, true); load(); });
   }
@@ -428,20 +467,38 @@
       .catch(function (e) { toast(e.message, true); load(); });
   }
 
+  var locating = false;
   function locate() {
     var label = $('locate-label');
+    var btn = $('locate-btn');
+    if (locating) return;
+    if (state.myPos) {
+      // Second click: turn location off again.
+      state.myPos = null;
+      label.textContent = 'Use my location';
+      btn.classList.remove('on');
+      btn.setAttribute('aria-pressed', 'false');
+      btn.title = '';
+      renderFeed();
+      return;
+    }
+    locating = true;
     label.textContent = 'Finding you…';
     getPosition()
       .then(function (pos) {
+        locating = false;
         state.myPos = pos;
         state.sort = 'nearest';
         $('sort').value = 'nearest';
         label.textContent = 'Location on';
-        $('locate-btn').classList.add('on');
+        btn.classList.add('on');
+        btn.setAttribute('aria-pressed', 'true');
+        btn.title = 'Click again to turn location off';
         renderFeed();
         if (map && state.view === 'map') map.setView([pos.lat, pos.lng], Math.max(map.getZoom(), 16));
       })
       .catch(function (e) {
+        locating = false;
         label.textContent = 'Use my location';
         toast(e.message, true);
       });
@@ -544,6 +601,14 @@
     if (map && view === 'map') map.invalidateSize(); // the map was hidden, so Leaflet needs to re-measure it
   }
 
+  function setAudience(aud) {
+    state.audience = aud;
+    try { localStorage.setItem('freeeats-audience', aud); } catch (e) { /* fine */ }
+    $('aud-all').setAttribute('aria-pressed', String(aud === 'all'));
+    $('aud-friends').setAttribute('aria-pressed', String(aud === 'friends'));
+    renderFeed();
+  }
+
   function showOnMap(id) {
     state.selectedId = id;
     setView('map');
@@ -583,7 +648,7 @@
 
   function pinIcon(p, selected) {
     return L.divIcon({
-      className: 'pin ' + pinClass(p) + (selected ? ' selected' : ''),
+      className: 'pin ' + pinClass(p) + (p.friend ? ' friend' : '') + (selected ? ' selected' : ''),
       html: '<span class="pin-body"><span class="pin-label">' + Number(p.servingsLeft) + '</span></span>',
       iconSize: [34, 42],
       iconAnchor: [17, 41],
@@ -612,9 +677,10 @@
     pinned.forEach(function (p) {
       seen[p.id] = true;
       var selected = p.id === state.selectedId;
-      var key = pinClass(p) + ':' + p.servingsLeft + ':' + selected + ':' + p.lat + ',' + p.lng;
+      var key = pinClass(p) + ':' + !!p.friend + ':' + p.servingsLeft + ':' + selected + ':' + p.lat + ',' + p.lng;
       var m = markers[p.id];
-      var label = p.title + ', ' + p.servingsLeft + ' of ' + p.servings + ' servings left, ' + p.building;
+      var label = p.title + ', ' + p.servingsLeft + ' of ' + p.servings + ' servings left, ' + p.building +
+        (p.friend ? ', shared by your friend ' + p.friend : '');
       if (!m) {
         m = L.marker([p.lat, p.lng], { icon: pinIcon(p, selected), title: label, alt: label, riseOnHover: true, keyboard: true });
         m.on('click', function (e) {
@@ -887,10 +953,24 @@
 
   var SHARE_TEXT = null;
 
+  function setVisibility(v) {
+    state.visibility = v;
+    $('vis-everyone').setAttribute('aria-pressed', String(v === 'everyone'));
+    $('vis-friends').setAttribute('aria-pressed', String(v === 'friends'));
+    var n = state.friends ? state.friends.friends.length : null;
+    $('vis-hint').className = 'hint' + (v === 'friends' && n === 0 ? ' warn' : '');
+    $('vis-hint').textContent = v === 'everyone'
+      ? 'Everyone signed in can see it and check in.'
+      : n === 0
+        ? 'You have not added any friends yet, so nobody else will see this. Add friends on your Account page.'
+        : 'Only your friends' + (n ? ' (' + n + ')' : '') + ' will see it and can check in.';
+  }
+
   function resetShareForm() {
     $('share-form').reset();
     setPhoto(null);
     setPinMode('none');
+    setVisibility('everyone');
     formStatus('');
     renderShareOptions();
   }
@@ -912,6 +992,7 @@
     $('description').value = p.description || '';
     $('address').value = p.address || '';
     setPhoto(null, p.photoUrl);
+    setVisibility(p.visibility || 'everyone');
     tagDropdown($('share-tags'), {
       title: 'Dietary info', placeholder: 'None selected', labelledBy: 'share-tags-label', name: 'tag',
       selected: p.tags, onChange: function () {},
@@ -991,6 +1072,7 @@
       hours: $('hours').value === '' ? undefined : Number($('hours').value),
       tags: Array.prototype.map.call(document.querySelectorAll('#share-tags input:checked'), function (i) { return i.value; }),
       photo: state.photoData || undefined,
+      visibility: state.visibility,
     };
     if (editing && editing.photoUrl && !state.photoData && !state.photoUrl) body.removePhoto = true;
     if (state.sharePos) {
@@ -1016,7 +1098,7 @@
     }
     api('POST', '/api/posts', body)
       .then(function (data) {
-        if (state.seenClaims && data.post) state.seenClaims[data.post.id] = 0;
+        if (state.seenClaims && data.post) state.seenClaims[data.post.id] = { count: 0, emails: [] };
         askNotifyPermission(); // so we can tell you when someone checks in
         resetShareForm();
         toast('Posted! Thanks for sharing. 🎉');
@@ -1044,6 +1126,103 @@
     if (d.toDateString() === today.toDateString()) return 'today, ' + time;
     if (d.toDateString() === yesterday.toDateString()) return 'yesterday, ' + time;
     return dateFmt ? dateFmt.format(d) : d.toLocaleString();
+  }
+
+  /* ------------------------------------------------------------ friends */
+
+  // Get the friend list. With `announce`, pop up new requests and newly accepted ones, and
+  // reload the food list, since which friends-only posts you can see may have changed.
+  function loadFriends(announce) {
+    return api('GET', '/api/friends')
+      .then(function (data) {
+        var before = state.friends;
+        setFriends(data);
+        if (!announce || !before) return;
+        var had = function (list, email) { return list.some(function (r) { return r.email === email; }); };
+        data.incoming.forEach(function (r) {
+          if (!had(before.incoming, r.email)) notify('New friend request', r.email + ' wants to be friends. Accept it on your Account page.', 'friend-' + r.email);
+        });
+        data.friends.forEach(function (r) {
+          if (!had(before.friends, r.email) && had(before.outgoing, r.email)) notify('Friend request accepted', r.email + ' is now your friend.', 'friend-' + r.email);
+        });
+        load();
+      })
+      .catch(function () { /* try again on the next update */ });
+  }
+
+  function setFriends(data) {
+    state.friends = { friends: data.friends, incoming: data.incoming, outgoing: data.outgoing };
+    var n = data.incoming.length;
+    $('tab-badge').hidden = !n;
+    $('tab-badge').textContent = n ? String(n) : '';
+    $('tab-account').setAttribute('aria-label', n ? 'Account, ' + n + ' friend request' + (n === 1 ? '' : 's') : 'Account');
+    renderFriends();
+    if (!$('view-share').hidden) setVisibility(state.visibility);
+    if (!$('view-find').hidden && state.audience === 'friends') renderFeed();
+  }
+
+  function friendStatus(message, isError) {
+    var s = $('friend-status');
+    s.textContent = message || '';
+    s.className = 'status' + (isError ? ' error' : '');
+  }
+
+  function friendAction(path, email, btn, done) {
+    if (btn) btn.disabled = true;
+    return api('POST', path, { email: email })
+      .then(function (data) {
+        setFriends(data);
+        if (done) done(data);
+        load();
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        friendStatus(e.message, true);
+      });
+  }
+
+  function friendRow(email, note, buttons) {
+    return h('div', { class: 'friend-row' },
+      h('div', { class: 'avatar', 'aria-hidden': 'true' }, email.charAt(0).toUpperCase()),
+      h('div', { class: 'who' }, email, note ? h('small', null, note) : null),
+      h('div', { class: 'row-btns' }, buttons));
+  }
+
+  function renderFriends() {
+    var box = $('friend-lists');
+    var f = state.friends;
+    box.textContent = '';
+    if (!f) return;
+    var group = function (title, rows) {
+      if (!rows.length) return;
+      box.appendChild(h('div', null, h('p', { class: 'hist-group' }, title), rows));
+    };
+    group('Friend requests', f.incoming.map(function (r) {
+      return friendRow(r.email, 'Sent ' + when(r.at), [
+        h('button', { type: 'button', class: 'btn primary small', onclick: function (e) {
+          friendAction('/api/friends', r.email, e.currentTarget, function () { friendStatus('You and ' + r.email + ' are now friends.'); });
+        } }, 'Accept'),
+        h('button', { type: 'button', class: 'btn quiet small', onclick: function (e) {
+          friendAction('/api/friends/remove', r.email, e.currentTarget, function () { friendStatus('Request declined.'); });
+        } }, 'Decline'),
+      ]);
+    }));
+    group('Your friends' + (f.friends.length ? ' (' + f.friends.length + ')' : ''), f.friends.map(function (r) {
+      return friendRow(r.email, 'Friends since ' + when(r.since), [
+        h('button', { type: 'button', class: 'linkish danger', onclick: function (e) {
+          if (!window.confirm('Remove ' + r.email + ' from your friends? You will stop seeing each other\'s friends-only food.')) return;
+          friendAction('/api/friends/remove', r.email, e.currentTarget, function () { friendStatus('Removed ' + r.email + '.'); });
+        } }, 'Remove'),
+      ]);
+    }));
+    group('Waiting for them to accept', f.outgoing.map(function (r) {
+      return friendRow(r.email, 'Sent ' + when(r.at), [
+        h('button', { type: 'button', class: 'linkish', onclick: function (e) {
+          friendAction('/api/friends/remove', r.email, e.currentTarget, function () { friendStatus('Request cancelled.'); });
+        } }, 'Cancel'),
+      ]);
+    }));
+    if (!box.children.length) box.appendChild(h('p', { class: 'muted small-text' }, 'No friends yet. Add someone by their school email above.'));
   }
 
   function loadAccount() {
@@ -1075,6 +1254,7 @@
     st.appendChild(stat(data.stats.servingsShared, 'Servings shared'));
     st.appendChild(stat(data.stats.studentsFed, data.stats.studentsFed === 1 ? 'Student fed' : 'Students fed'));
 
+    if (data.friends) setFriends(data.friends);
     renderHistory($('checkins-list'), data.checkins, 'checkin');
     renderHistory($('myposts-list'), data.posts, 'post');
 
@@ -1138,7 +1318,8 @@
       : h('span', { class: 'status-chip live' }, kind === 'checkin' ? 'Ready for pickup' : 'Live');
     var meta2 = kind === 'checkin'
       ? 'Checked in ' + when(p.checkedInAt) + (live ? ' · ' + endsIn(p.expiresAt) : '')
-      : 'Posted ' + when(p.createdAt) + ' · ' + claimed + ' of ' + p.servings + ' servings claimed';
+      : 'Posted ' + when(p.createdAt) + ' · ' + claimed + ' of ' + p.servings + ' servings claimed' +
+        (p.visibility === 'friends' ? ' · Friends only' : '');
 
     var actions = [];
     if (live && p.lat !== null) {
@@ -1169,7 +1350,11 @@
       h('div', { class: 'hist-main' },
         h('p', { class: 'hist-title' }, h('span', null, p.title), chip),
         h('p', { class: 'hist-meta' }, p.building + (p.details ? ' · ' + p.details : '')),
-        h('p', { class: 'hist-meta' }, meta2)),
+        h('p', { class: 'hist-meta' }, meta2),
+        kind === 'post' && claimed > 0 && p.checkedIn
+          ? h('p', { class: 'hist-meta hist-who' }, 'Checked in: ' +
+              whoText(checkinEmails(p).slice(-5).reverse(), claimed - Math.min(5, checkinEmails(p).length)))
+          : null),
       actions.length ? h('div', { class: 'hist-actions' }, actions) : null);
   }
 
@@ -1203,10 +1388,13 @@
   function signedIn(user) {
     state.user = user;
     connectEvents();
+    loadFriends(false);
     state.filters = (user.diet || []).slice(); // saved preferences are the starting filters
     renderFilters();
     $('view-list').setAttribute('aria-pressed', String(state.view === 'list'));
     $('view-map').setAttribute('aria-pressed', String(state.view === 'map'));
+    $('aud-all').setAttribute('aria-pressed', String(state.audience === 'all'));
+    $('aud-friends').setAttribute('aria-pressed', String(state.audience === 'friends'));
     $('view-auth').hidden = true;
     $('tabs').hidden = false;
     $('user-bar').hidden = false;
@@ -1218,6 +1406,8 @@
   function signedOut(message) {
     state.user = null;
     disconnectEvents();
+    state.friends = null;
+    $('tab-badge').hidden = true;
     state.posts = [];
     state.seenClaims = null;
     state.loaded = false;
@@ -1470,6 +1660,24 @@
     if (e.key === 'Enter') { e.preventDefault(); findAddress().catch(function () {}); }
   });
   $('share-form').addEventListener('submit', submitPost);
+  $('vis-everyone').addEventListener('click', function () { setVisibility('everyone'); });
+  $('vis-friends').addEventListener('click', function () { setVisibility('friends'); });
+  $('aud-all').addEventListener('click', function () { setAudience('all'); });
+  $('aud-friends').addEventListener('click', function () { setAudience('friends'); });
+  $('friend-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var email = $('friend-email').value.trim().toLowerCase();
+    if (!email) { friendStatus('Type your friend\'s school email.', true); $('friend-email').focus(); return; }
+    friendStatus('');
+    var btn = $('friend-btn');
+    friendAction('/api/friends', email, btn, function (data) {
+      btn.disabled = false;
+      $('friend-email').value = '';
+      friendStatus(data.result === 'friends' ? 'You and ' + email + ' are now friends.'
+        : data.result === 'already' ? 'You are already friends with ' + email + '.'
+        : 'Request sent. Once ' + email + ' accepts, you can see each other\'s friends-only food.');
+    });
+  });
   $('edit-cancel').addEventListener('click', function () {
     var back = state.editReturn;
     endEdit();
@@ -1491,7 +1699,7 @@
   });
 
   api('GET', '/api/config')
-    .then(function (cfg) { state.config = { tags: cfg.tags, durations: cfg.durations }; })
+    .then(function (cfg) { state.config = { tags: cfg.tags, durations: cfg.durations, maxCheckins: cfg.maxCheckins || 2 }; })
     .catch(function () { /* fall back to built-in defaults */ })
     .then(function () {
       renderFilters();

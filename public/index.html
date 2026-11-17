@@ -23,7 +23,7 @@
       <nav class="tabs" id="tabs" aria-label="Sections" hidden>
         <button type="button" class="tab" id="tab-find" aria-pressed="true">Find food</button>
         <button type="button" class="tab" id="tab-share" aria-pressed="false">Share food</button>
-        <button type="button" class="tab" id="tab-account" aria-pressed="false">Account</button>
+        <button type="button" class="tab" id="tab-account" aria-pressed="false">Account <span class="tab-badge" id="tab-badge" hidden></span></button>
       </nav>
       <div class="user" id="user-bar" hidden>
         <button type="button" class="user-email linkish" id="user-email" aria-label="Open your account"></button>
@@ -101,7 +101,11 @@
           <button type="button" class="seg-btn" id="view-list" aria-pressed="true"><span aria-hidden="true">☰</span> List</button>
           <button type="button" class="seg-btn" id="view-map" aria-pressed="false"><span aria-hidden="true">🗺️</span> Map</button>
         </div>
-        <button type="button" class="btn" id="locate-btn">
+        <div class="seg" role="group" aria-label="Whose food">
+          <button type="button" class="seg-btn" id="aud-all" aria-pressed="true">Everyone</button>
+          <button type="button" class="seg-btn" id="aud-friends" aria-pressed="false"><span aria-hidden="true">👥</span> Friends</button>
+        </div>
+        <button type="button" class="btn" id="locate-btn" aria-pressed="false">
           <span aria-hidden="true">📍</span> <span id="locate-label">Use my location</span>
         </button>
         <div class="dd" id="filters"></div>
@@ -131,7 +135,7 @@
               <li><span class="dot available"></span>Available</li>
               <li><span class="dot low"></span>3 or fewer left</li>
               <li><span class="dot claimed"></span>You're checked in</li>
-              <li><span class="dot mine"></span>Your post</li>
+              <li><span class="dot friend"></span>Friend's post</li>
               <li><span class="dot me"></span>You</li>
             </ul>
             <button type="button" class="btn quiet small" id="map-fit">Show all pins</button>
@@ -218,6 +222,14 @@
           <div class="dd" id="share-tags"></div>
         </div>
 
+        <div class="field">
+          <span id="vis-label">Who can see this?</span>
+          <div class="seg pin-choice" role="group" aria-labelledby="vis-label">
+            <button type="button" class="seg-btn" id="vis-everyone" aria-pressed="true">Everyone</button>
+            <button type="button" class="seg-btn" id="vis-friends" aria-pressed="false"><span aria-hidden="true">👥</span> Friends only</button>
+          </div>
+          <p class="hint" id="vis-hint" aria-live="polite">Everyone signed in can see it and check in.</p>
+        </div>
         <label class="field">
           <span>Available for about</span>
           <select id="hours"></select>
@@ -263,6 +275,19 @@
           </section>
         </div>
 
+        <section class="panel acct-section" aria-labelledby="friends-title">
+          <h3 id="friends-title">Friends</h3>
+          <p class="muted small-text">Friends can see the food you share as "Friends only", and you can see theirs. They have to accept your request first.</p>
+          <form id="friend-form" class="friend-form" novalidate>
+            <label class="field">
+              <span>Add a friend by school email</span>
+              <input id="friend-email" type="email" inputmode="email" autocomplete="off" maxlength="254" placeholder="friend@school.edu">
+            </label>
+            <button type="submit" class="btn" id="friend-btn">Send request</button>
+          </form>
+          <p class="status" id="friend-status" role="status" aria-live="polite"></p>
+          <div class="friend-lists" id="friend-lists"></div>
+        </section>
         <div class="account-grid">
           <section class="panel acct-section" aria-labelledby="prefs-title">
             <h3 id="prefs-title">Preferences</h3>

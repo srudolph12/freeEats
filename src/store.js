@@ -24,6 +24,7 @@ class AppError extends Error {
 
 const TAGS = ['vegetarian', 'vegan', 'gluten-free', 'dairy-free', 'halal', 'kosher'];
 const DURATIONS_HOURS = [0.5, 1, 1.5, 2]; // food can be listed for at most 2 hours
+const VISIBILITY = ['everyone', 'friends']; // who can see a post
 const LIMITS = {
   title: 80,
   description: 300,
@@ -37,6 +38,7 @@ const HOUR = 60 * 60 * 1000;
 const PHOTO_KEEP_MS = 24 * HOUR; // photos of ended posts are deleted after this
 const HISTORY_KEEP_MS = 180 * 24 * HOUR; // ended posts stay in account history this long, then are deleted
 const HISTORY_LIMIT = 100; // most items returned per history list
+const MAX_ACTIVE_CHECKINS = 2; // live check-ins one student can hold at the same time
 
 const PHOTO_TYPES = {
   'image/jpeg': { ext: 'jpg', ok: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
@@ -101,6 +103,9 @@ function validatePost(input) {
   if (!Array.isArray(tags) || tags.some((t) => TAGS.indexOf(t) === -1)) {
     throw new AppError(400, 'Dietary tags must be from: ' + TAGS.join(', ') + '.');
   }
+  if (input.visibility !== undefined && VISIBILITY.indexOf(input.visibility) === -1) {
+    throw new AppError(400, 'Who can see it must be "everyone" or "friends".');
+  }
   const lat = coordinate(input.lat, -90, 90);
   const lng = coordinate(input.lng, -180, 180);
   if ((lat === null) !== (lng === null)) throw new AppError(400, 'Send both latitude and longitude, or neither.');
@@ -117,6 +122,7 @@ function validatePost(input) {
     lat,
     lng,
     photo: decodePhoto(input.photo),
+    visibility: input.visibility === undefined ? null : input.visibility, // null: keep it (or "everyone" for new posts)
   };
 }
 
@@ -172,7 +178,17 @@ class Store {
     return !p.closedAt && p.expiresAt > this.now();
   }
 
-  view(p, me) {
+  /**
+   * Can this student see the post? Friends-only posts are for the poster's friends, the poster,
+   * and anyone already checked in (so unfriending does not take away a saved serving).
+   * `friends` is a Map of the student's friends: hashed id -> email.
+   */
+  canSee(p, me, friends) {
+    return p.visibility !== 'friends' || p.ownerId === me || p.claims.indexOf(me) !== -1 || (!!friends && friends.has(p.ownerId));
+  }
+
+  view(p, me, friends) {
+    const mine = !!me && p.ownerId === me;
     return {
       id: p.id,
       title: p.title,
@@ -191,18 +207,21 @@ class Store {
       closedAt: p.closedAt || null,
       editedAt: p.editedAt || null,
       status: !this.isActive(p) ? 'ended' : this.left(p) > 0 ? 'available' : 'gone',
-      mine: !!me && p.ownerId === me,
+      mine,
       claimedByMe: !!me && p.claims.indexOf(me) !== -1,
+      visibility: p.visibility || 'everyone',
+      friend: (!mine && friends && friends.get(p.ownerId)) || null, // the poster's email, only if they are your friend
     };
   }
 
   /** Live posts, newest first. Fully claimed posts are only shown to their owner and claimers. */
-  list(clientId) {
+  list(clientId, friends) {
     const me = isValidClientId(clientId) ? hashClient(clientId) : null;
     return this.posts
-      .filter((p) => this.isActive(p) && (this.left(p) > 0 || p.ownerId === me || p.claims.indexOf(me) !== -1))
+      .filter((p) => this.isActive(p) && this.canSee(p, me, friends) &&
+        (this.left(p) > 0 || p.ownerId === me || p.claims.indexOf(me) !== -1))
       .sort((a, b) => b.createdAt - a.createdAt)
-      .map((p) => this.view(p, me));
+      .map((p) => this.view(p, me, friends));
   }
 
   find(id) {
@@ -234,6 +253,7 @@ class Store {
         lat: clean.lat,
         lng: clean.lng,
         photo,
+        visibility: clean.visibility || 'everyone',
         createdAt: now,
         expiresAt: now + clean.hours * HOUR,
         closedAt: null,
@@ -248,23 +268,28 @@ class Store {
     });
   }
 
-  claim(id, clientId) {
+  claim(id, clientId, friends) {
     return this.exclusive(async () => {
       const me = this.requireClient(clientId);
       const p = this.find(id);
+      if (!this.canSee(p, me, friends)) throw new AppError(404, 'That post no longer exists.');
       if (!this.isActive(p)) throw new AppError(410, 'This food is no longer available.');
       if (p.ownerId === me) throw new AppError(400, 'You posted this one, so there is no need to check in.');
       if (p.claims.indexOf(me) !== -1) throw new AppError(409, 'You already checked in for this one.');
       if (this.left(p) <= 0) throw new AppError(409, 'Sorry, every serving has been claimed.');
+      const active = this.posts.filter((x) => this.isActive(x) && x.claims.indexOf(me) !== -1).length;
+      if (active >= MAX_ACTIVE_CHECKINS) {
+        throw new AppError(409, 'You can have ' + MAX_ACTIVE_CHECKINS + ' check-ins at a time. Pick up your food or cancel a check-in first.');
+      }
       p.claims.push(me);
       if (!p.claimTimes) p.claimTimes = {};
       p.claimTimes[me] = this.now();
       await this.save();
-      return this.view(p, me);
+      return this.view(p, me, friends);
     });
   }
 
-  unclaim(id, clientId) {
+  unclaim(id, clientId, friends) {
     return this.exclusive(async () => {
       const me = this.requireClient(clientId);
       const p = this.find(id);
@@ -274,7 +299,7 @@ class Store {
       p.claims.splice(i, 1);
       if (p.claimTimes) delete p.claimTimes[me];
       await this.save();
-      return this.view(p, me);
+      return this.view(p, me, friends);
     });
   }
 
@@ -334,6 +359,7 @@ class Store {
         lat: clean.lat,
         lng: clean.lng,
         photo,
+        visibility: clean.visibility || p.visibility || 'everyone',
         expiresAt,
         editedAt: this.now(),
       });
@@ -356,14 +382,14 @@ class Store {
   }
 
   /** Everything one student has checked in for or posted (live and past), newest first, plus totals. */
-  history(clientId) {
+  history(clientId, friends) {
     const me = this.requireClient(clientId);
     const checkins = [];
     const posts = [];
     for (const p of this.posts) {
       if (p.ownerId === me) posts.push(this.view(p, me));
       if (p.claims.indexOf(me) !== -1) {
-        const v = this.view(p, me);
+        const v = this.view(p, me, friends);
         v.checkedInAt = (p.claimTimes && p.claimTimes[me]) || p.createdAt;
         checkins.push(v);
       }
@@ -410,4 +436,4 @@ class Store {
   }
 }
 
-module.exports = { Store, AppError, TAGS, DURATIONS_HOURS, LIMITS, isValidClientId, hashClient };
+module.exports = { Store, AppError, TAGS, DURATIONS_HOURS, VISIBILITY, LIMITS, MAX_ACTIVE_CHECKINS, isValidClientId, hashClient };

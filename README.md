@@ -45,43 +45,49 @@ npm run dev:mail                   # start it again
 
 - The posts come from fake students (`name@demo.edu`). Nobody is emailed, and they can not sign in.
 - Some servings are already claimed, so you get a mix of full, half-gone and almost-gone pins.
-- `--me` is optional. It gives your account two past check-ins, one past post, and a live check-in, so the Account page has something to show.
+- `--me` is optional. It gives your account two past check-ins and one past post, so the Account page has something to show, but no live check-ins, so you start with your full 2. It also signs that account out on every device, so the app opens at the sign-in screen (sign in again with your password or an emailed code). The fake check-in script's sign-in is kept. It also makes you friends with maya, omar, grace and diego (`@demo.edu`), adds 3 **friends-only** posts from them (banana bread, biryani, birthday cake; add `banana-bread`, `biryani` and `cake` photos to `scripts/demo-photos/` if you like), and leaves a friend request from priya for you to accept.
 - Posts end within 2 hours like real ones, so run it shortly before you present. Running it again replaces the old demo posts.
-- `npm run demo -- --clear` removes every demo post. Real posts are never touched.
+- `npm run demo -- --clear` removes every demo post and demo friendship. Real posts and friends are never touched.
 - Photos come from `scripts/demo-photos/`, named after each post (`pizza.jpg`, `boba.png`, `cookies.webp`, ...; see `photo:` in `scripts/demo.js`). Posts without one show a plate placeholder. JPEG, PNG or WebP, under 3 MB.
 - For another campus, edit `PLACES` in `scripts/demo.js`.
 
 To test the check-in pop-up, have a fake student check in to your own post:
 
 ```bash
-npm run fake-checkin -- --setup              # once, with the server stopped
+npm run fake-checkin -- --setup you@usc.edu  # once, with the server stopped
 npm run fake-checkin -- you@usc.edu          # server running: one check-in on your newest live post
 npm run fake-checkin -- you@usc.edu --count 3 --title pizza
 ```
+
+It works on public and friends-only posts. For a friends-only post, each fake student briefly becomes your friend, checks in, and unfriends you again, so your friend list ends up unchanged.
 
 ## What it does
 
 **Find food**
 - Live list of food that's still available, refreshed every 20 seconds
-- **Map view**: every post with a pinned location is a pin showing how many servings are left, colored by status (available, almost gone, you're checked in, your post), plus a blue dot for you. Click a pin to see the food and check in right there. "Show on map" on any list card jumps to its pin.
-- Sort by nearest (after "Use my location"), newest, ending soon, or most servings left
+- **Map view**: every post with a pinned location is a pin showing how many servings are left, colored by status (available, almost gone, you're checked in), with a green outline for friends' food, plus a blue dot for you. Click a pin to see the food and check in right there. "Show on map" on any list card jumps to its pin.
+- Sort by nearest (after "Use my location"; click it again to turn location off), newest, ending soon, or most servings left
 - Filter by dietary tags: vegetarian, vegan, gluten-free, dairy-free, halal, kosher
-- **Check in for a serving**: holds one serving for you. Once per student per post. You can cancel to give it back.
+- **Everyone / Friends** switch: Everyone shows food shared with everyone; friends-only posts are only under Friends, which shows food your friends posted plus friends-only posts (including your own), in the list and on the map. Posts from friends say who shared them; other posts stay anonymous.
+- **Check in for a serving**: holds one serving for you. Once per student per post, and at most **2 check-ins at a time** (a check-in stops counting once that food ends). You can cancel to give it back. Change `MAX_ACTIVE_CHECKINS` in `src/store.js` to adjust the limit.
 - Fully claimed posts disappear from everyone else's list.
+- Your own posts are not listed in Find food; you manage them from your Account page.
 
 **Your account** (the Account tab, or tap your email in the header)
 - Your totals: check-ins, food posts, servings shared, and students fed
 - Your check-ins and your food posts, split into "Happening now" and "Past", with Cancel / Mark as gone / Show on map for live ones
 - Saved dietary preferences: Find food starts with these filters on, on any device
+- **Friends**: add a friend by school email. They accept the request on their Account page (or add you back), and then you're friends. You can decline requests, cancel your own, or remove a friend. New requests show as a badge on the Account tab and pop up live.
 - Sign out, or sign out on all devices
 
 **Share food**
 - Take or choose a photo (resized in the browser to keep uploads small)
 - What it is, number of servings (1-200), building, room or spot, optional notes
 - Optionally pin it on the map, either at your current GPS location or at a **street address** you type. Addresses are looked up with OpenStreetMap's free Nominatim service (no API key), and you can drag the pin on the preview map to the exact spot. Pinned posts show on the map and work with "nearest" sorting and Directions.
+- **Who can see it**: Everyone, or **Friends only**. Friends-only food is hidden from everyone except your friends, and only they can check in. Someone who already checked in keeps their serving even if you unfriend them.
 - Choose how long it's available: 30 minutes, 1 hour, 1.5 hours, or 2 hours (the most). The poster can **Mark as gone** at any time.
 - **Edit** your own live post (from its card or your Account page): change the text, servings (not below how many have checked in), photo, pin, dietary info, or time (still at most 2 hours from when it was first posted).
-- **Check-in alerts**: while the app is open (on any tab), a pop-up appears the moment someone checks in for your food, saying how many servings are left. The server pushes it over a live connection (`/api/events`), with the 20-second refresh as a backup. After you post, the browser asks whether it may also send system notifications, which show up when FreeEats is in a background tab. You also get an **email**: the first check-in is emailed right away, and any more within 5 minutes are bundled into one follow-up email. Alerts never say who checked in. Demo (`@demo.edu`) posters are never emailed.
+- **Check-in alerts**: while the app is open (on any tab), a pop-up appears the moment someone checks in for your food, saying who (their school email) and how many servings are left. The server pushes it over a live connection (`/api/events`), with the 20-second refresh as a backup. After you post, the browser asks whether it may also send system notifications, which show up when FreeEats is in a background tab. You also get an **email**: the first check-in is emailed right away, and any more within 5 minutes are bundled into one follow-up email. The email names who checked in too, and your Account page lists who checked in to each of your posts. Only the poster sees these names, and students are told when they check in. Demo (`@demo.edu`) posters are never emailed.
 - **Delete** your own post, live or past, from your Account page. It is removed for good, including from the history of anyone who checked in.
 
 ## How it's built
@@ -89,12 +95,13 @@ npm run fake-checkin -- you@usc.edu --count 3 --title pizza
 ```
 src/store.js     posts, photos, check-ins, expiry, persistence
 src/auth.js      .edu email sign-in: codes, sessions
+src/friends.js   friend requests and friendships
 src/mailer.js    sends the code emails over SMTP (or prints them)
 src/server.js    web server + JSON API
 public/          index.html, app.js, style.css (the whole front end)
 public/vendor/   Leaflet 1.9.4 map library (BSD-2) and the DM Sans + Graduate fonts (SIL OFL), copied in so there is still no npm install
 test/            node:test suites for the store and the API
-data/            created at runtime: posts.json, sessions.json, users.json, uploads/ (git-ignored)
+data/            created at runtime: posts.json, sessions.json, users.json, friends.json, uploads/ (git-ignored)
 ```
 
 ### API
@@ -110,13 +117,16 @@ data/            created at runtime: posts.json, sessions.json, users.json, uplo
 | GET | `/api/account` | Profile, totals, check-in history, your posts |
 | PUT | `/api/account/preferences` | `{ diet: [tags] }`: saved dietary preferences |
 | GET | `/api/posts` | Live posts (all `/api/posts` routes need a signed-in student) |
-| POST | `/api/posts` | Share food: `{ title, servings, building, details, address, description, tags, hours, lat, lng, photo }`. `hours` is 0.5, 1, 1.5, or 2. |
+| POST | `/api/posts` | Share food: `{ title, servings, building, details, address, description, tags, hours, lat, lng, photo, visibility }`. `visibility` is `everyone` (default) or `friends`. `hours` is 0.5, 1, 1.5, or 2. |
 | GET | `/api/geocode?q=address` | Map coordinates for an address (signed in; 15 lookups a minute). Add `&lat=&lng=` to prefer matches near there. |
 | PATCH | `/api/posts/:id` | Poster edits a live post (same fields as POST; leave out `hours` to keep the end time, `removePhoto: true` to drop the photo) |
 | DELETE | `/api/posts/:id` | Poster deletes a post, live or past |
 | POST | `/api/posts/:id/claim` | Check in for one serving |
 | DELETE | `/api/posts/:id/claim` | Cancel your check-in |
 | POST | `/api/posts/:id/close` | Poster marks the food as gone |
+| GET | `/api/friends` | Your friends, incoming requests and sent requests |
+| POST | `/api/friends` | `{ email }`: send a friend request, or accept theirs. Returns `result`: `requested`, `friends` or `already` |
+| POST | `/api/friends/remove` | `{ email }`: unfriend, decline their request, or cancel yours |
 | GET | `/api/events` | Live updates for the signed-in student (Server-Sent Events): `checkin` / `cancel` when someone checks in to or cancels on one of their posts |
 | GET | `/uploads/:file` | Photos |
 
